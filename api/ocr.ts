@@ -128,9 +128,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       }
       lastStatus = r.status;
       lastText = await r.text().catch(() => '');
-      // Try the next model only if this one is unavailable/not-found; a real quota/server
-      // error is the same for every model, so pass it straight through.
-      if (r.status !== 404) break;
+      // Try the next model if this one is retired (404) or briefly overloaded (503).
+      // A per-key rate limit (429) or a real outage is the same for every model, so that
+      // is passed straight back to the client, which does its own short retry/backoff.
+      if (r.status !== 404 && r.status !== 503) break;
     }
     res.status(lastStatus).json({ error: `Gemini error ${lastStatus}: ${lastText.slice(0, 300)}` });
   } finally {
