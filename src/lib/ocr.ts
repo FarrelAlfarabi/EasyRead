@@ -3,7 +3,7 @@ import { db } from './db';
 import { GeminiOcrError, geminiBlocksToLines, geminiOcrPage } from './geminiOcr';
 import { emitLibraryChange, rebuildBook } from './library';
 import { ocrToLines, type OcrBlockLike } from './ocrLines';
-import { openPdf, renderPage } from './pdf';
+import { ocrScale, openPdf, renderPage } from './pdf';
 import { OCR_LANGS } from './settings';
 import type { PageData } from './types';
 
@@ -148,6 +148,7 @@ async function getTesseract(lang: string): Promise<TessWorker> {
     const bundled = langs.every((l) => BUNDLED_LANGS.includes(l));
     tessLoading = (async () => {
       const { createWorker } = await import('tesseract.js');
+      // OEM 1 = LSTM engine only (with the "best" integer model for bundled languages).
       const w = await createWorker(langs, 1, {
         // Engine files are served from this site (see scripts/copy-tesseract.mjs).
         workerPath: '/tesseract/worker.min.js',
@@ -157,6 +158,9 @@ async function getTesseract(lang: string): Promise<TessWorker> {
         cacheMethod: 'write',
         langPath: bundled ? '/tesseract/lang' : undefined,
       });
+      // PSM 3 (fully automatic layout) read book pages best in testing; the library default
+      // (6, one uniform block) mangled headings and indented paragraphs on degraded scans.
+      await w.setParameters({ tessedit_pageseg_mode: '3' as never });
       tess = w;
       return w;
     })();
@@ -165,22 +169,116 @@ async function getTesseract(lang: string): Promise<TessWorker> {
 }
 
 async function terminateTesseract() {
+  prepWorker?.terminate();
+  prepWorker = null;
+  for (const p of prepPending.values()) p.reject(new Error('stopped'));
+  prepPending.clear();
   const w = tess;
   tess = null;
   tessLoading = null;
   if (w) await w.terminate().catch(() => undefined);
 }
 
-async function tesseractPage(pdf: Awaited<ReturnType<typeof openPdf>>, page: number, lang: string) {
-  const worker = await getTesseract(lang);
-  const { canvas, scale } = await renderPage(pdf, page);
-  try {
-    const res = await worker.recognize(canvas, {}, { blocks: true, text: false });
-    return ocrToLines(res.data.blocks as unknown as OcrBlockLike[], scale);
-  } finally {
-    canvas.width = 0;
-    canvas.height = 0;
+/* Image cleanup and OCR text repair run in their own worker so the page stays responsive. */
+let prepWorker: Worker | null = null;
+let prepSeq = 0;
+const prepPending = new Map<number, { resolve: (r: Record<string, unknown>) => void; reject: (e: Error) => void }>();
+function callPrep<T>(msg: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+  if (!prepWorker) {
+    prepWorker = new Worker(new URL('../workers/preprocess.worker.ts', import.meta.url), { type: 'module' });
+    prepWorker.onmessage = (e: MessageEvent<{ id: number; error?: string } & Record<string, unknown>>) => {
+      const p = prepPending.get(e.data.id);
+      if (!p) return;
+      prepPending.delete(e.data.id);
+      if (e.data.error) p.reject(new Error(e.data.error));
+      else p.resolve(e.data);
+    };
   }
+  const id = ++prepSeq;
+  const worker = prepWorker;
+  return new Promise<T>((resolve, reject) => {
+    prepPending.set(id, { resolve: resolve as (r: Record<string, unknown>) => void, reject });
+    worker.postMessage({ ...msg, id }, transfer);
+  });
+}
+
+/** Keep only what ocrToLines needs from Tesseract's (large) result before sending it to the worker. */
+function slimBlocks(blocks: unknown): OcrBlockLike[] {
+  const bs = (blocks ?? []) as Array<{ paragraphs: Array<{ lines: Array<OcrBlockLike['paragraphs'][number]['lines'][number]> }> }>;
+  return bs.map((b) => ({
+    paragraphs: b.paragraphs.map((p) => ({
+      lines: p.lines.map((l) => ({
+        text: l.text,
+        confidence: l.confidence,
+        bbox: l.bbox,
+        words: (l.words ?? []).map((w) => ({ text: w.text, confidence: w.confidence, bbox: w.bbox })),
+      })),
+    })),
+  }));
+}
+
+/** Set localStorage "easyread:debugOcr" = "1" to keep the last cleaned page image for inspection. */
+function debugOcr(): boolean {
+  try {
+    return localStorage.getItem('easyread:debugOcr') === '1';
+  } catch {
+    return false;
+  }
+}
+
+// One fallback page at a time: 300 DPI canvases are large, and Tesseract has one worker anyway.
+let tessLock: Promise<unknown> = Promise.resolve();
+
+async function tesseractPage(pdf: Awaited<ReturnType<typeof openPdf>>, page: number, lang: string) {
+  const run = tessLock.then(async () => {
+    const worker = await getTesseract(lang);
+    const t0 = performance.now();
+    const { canvas, scale } = await renderPage(pdf, page, 0, ocrScale);
+    try {
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        try {
+          if (debugOcr()) (window as unknown as { __easyreadLastOcrRaw?: string }).__easyreadLastOcrRaw = canvas.toDataURL('image/png');
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const buf = img.data.buffer as ArrayBuffer;
+          const { buffer, skewDegrees, ms } = await callPrep<{ buffer: ArrayBuffer; skewDegrees: number; ms: number }>(
+            { kind: 'image', buffer: buf, width: img.width, height: img.height },
+            [buf],
+          );
+          ctx.putImageData(new ImageData(new Uint8ClampedArray(buffer), canvas.width, canvas.height), 0, 0);
+          lastPrep = { ms, skewDegrees };
+        } catch (e) {
+          // Cleanup is an improvement, not a requirement: OCR the raw render if it fails.
+          console.warn('OCR image cleanup failed, using the raw page:', e);
+        }
+      }
+      if (debugOcr()) (window as unknown as { __easyreadLastOcrImage?: string }).__easyreadLastOcrImage = canvas.toDataURL('image/png');
+      const t1 = performance.now();
+      const res = await worker.recognize(canvas, { user_defined_dpi: String(Math.round(scale * 72)) } as never, { blocks: true, text: false });
+      const t2 = performance.now();
+      let lines: PageData['lines'];
+      try {
+        ({ lines } = await callPrep<{ lines: PageData['lines'] }>({ kind: 'lines', blocks: slimBlocks(res.data.blocks), scale, english: lang === 'eng' }));
+      } catch {
+        lines = ocrToLines(res.data.blocks as unknown as OcrBlockLike[], scale);
+      }
+      const t3 = performance.now();
+      lastTimings = { renderAndPrepMs: t1 - t0, ocrMs: t2 - t1, cleanupMs: t3 - t2 };
+      return lines;
+    } finally {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  });
+  tessLock = run.catch(() => undefined);
+  return run;
+}
+
+/** Timings of the most recent fallback page, for diagnostics and tests. */
+export let lastTimings: { renderAndPrepMs: number; ocrMs: number; cleanupMs: number } | null = null;
+export let lastPrep: { ms: number; skewDegrees: number } | null = null;
+if (typeof window !== 'undefined') {
+  (window as unknown as { __easyreadOcrStats?: () => unknown }).__easyreadOcrStats = () => ({ lastTimings, lastPrep });
 }
 
 /* ---------------- one page: Gemini, falling back to Tesseract ---------------- */

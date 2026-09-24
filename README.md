@@ -72,10 +72,31 @@ If that call fails for any reason (offline, rate-limited, Gemini down, or `GEMIN
 - `api/ocr.ts` is the Vercel serverless function that calls the Gemini API. `GEMINI_API_KEY` is read only here.
 - `src/lib/db.ts` stores books, pages and reading state in IndexedDB. Settings live in localStorage.
 
+## On-device OCR quality (fallback path)
+
+When Gemini is unavailable, pages are read on-device with Tesseract. Three steps make that much more usable than plain Tesseract:
+
+1. Image cleanup (in a Web Worker, `src/lib/preprocess.ts`): render at about 300 DPI (capped at 5 to 8.5 megapixels depending on device memory), grayscale, contrast stretch, deskew (projection profile, up to 6 degrees), then Sauvola adaptive thresholding.
+2. Tesseract settings: LSTM engine with the "best" integer English model, page segmentation mode 3 (automatic layout).
+3. Text cleanup for English (`src/lib/ocrCleanup.ts`): a 60,000 word frequency list (built from SUBTLEX-US at build time, about 240 KB gzipped, downloaded only when the fallback runs) is used to split glued words ("thefool" to "the fool", "Ifyou" to "If you") and fix look-alike letters ("commil" to "commit", "tfwy" to "they"). A fix is applied only when it is clearly the best one. Known words, capitalized words (likely names) and acronyms are never respelled. Lines that are mostly non-words, stray quote marks, and big "headings" made of junk are dropped.
+
+Measured on test pages (word accuracy, page rendered as a scanned image, Chromium, forced fallback):
+
+| Test page | Before | After |
+| --- | --- | --- |
+| Clean scan | 100% | 100% |
+| Moderate (1.2 degree skew, blur, low contrast, JPEG) | 7% | 99% |
+| Severe (about 95 DPI, 2 degree skew, noise) | 16% | 38% |
+| Extreme (about 40 DPI) | 0% (junk shown) | 0% (junk hidden) |
+
+Time per page on the test machine: about 0.7 s render and cleanup plus 3.2 s OCR, about 4 to 5 s in total (was 4 to 8 s, since Tesseract slows down on noisy pages). Phones are slower.
+
+Tried and not shipped: median filter denoise and speck removal (both hurt blurry, low-resolution text), unsharp mask (hurt every test page), Otsu and Wolf thresholding (worse than Sauvola), page segmentation modes 4 and 6 (4 about equal, 6 worse on degraded pages), and the larger 10.9 MB standard English model (same results as the 2.9 MB "best" integer model). The float "tessdata_best" model could not be downloaded in the build environment, so it was not tested.
+
 ## Limits
 
 - Complex layouts (two columns, tables, footnotes, magazines, textbooks with side boxes) may come out in the wrong order.
 - Scanned pages are sent to Google's Gemini API for reading (see above). This is the one part of EasyRead that is not fully on-device. Gemini API usage has a small cost, a small fraction of a cent per page.
-- If Gemini is unavailable, the on-device fallback (Tesseract) is noticeably lower quality: it can garble headings and merge words together, especially on low-resolution scans.
+- If Gemini is unavailable, the on-device fallback (Tesseract) is still lower quality on poor scans. It is good on clean and moderately degraded pages, but very low resolution scans (under about 100 DPI) remain hard to read. Word repair is English only.
 - Images and figures are not shown.
 - The on-device fallback needs internet the first time it runs, to download the OCR engine and language data (a few MB). After that it is cached.

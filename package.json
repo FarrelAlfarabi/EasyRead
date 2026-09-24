@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "predev": "node scripts/copy-tesseract.mjs",
+    "predev": "node scripts/copy-tesseract.mjs && node scripts/build-dict.mjs",
     "dev": "vite",
-    "prebuild": "node scripts/copy-tesseract.mjs",
+    "prebuild": "node scripts/copy-tesseract.mjs && node scripts/build-dict.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint src",
     "typecheck": "tsc -b",
@@ -29,6 +29,7 @@
     "@vitejs/plugin-react": "^6.1.1",
     "oxlint": "^1.81.0",
     "pdf-lib": "^1.17.1",
+    "subtlex-word-frequencies": "^2.0.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0",
     "vitest": "^5.0.1"

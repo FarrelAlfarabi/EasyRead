@@ -87,10 +87,15 @@ export async function getTitle(pdf: PDFDocumentProxy, fallback: string): Promise
 }
 
 /** Render a page to a canvas for OCR. Returns the canvas and the scale used (px per PDF point). */
-export async function renderPage(pdf: PDFDocumentProxy, n: number, maxWidth = 2400): Promise<{ canvas: HTMLCanvasElement; scale: number }> {
+export async function renderPage(
+  pdf: PDFDocumentProxy,
+  n: number,
+  maxWidth = 2400,
+  pickScale?: (base: { width: number; height: number }) => number,
+): Promise<{ canvas: HTMLCanvasElement; scale: number }> {
   const page = await pdf.getPage(n);
   const base = page.getViewport({ scale: 1 });
-  const scale = Math.min(2.5, maxWidth / base.width, Math.max(2, 1600 / base.width));
+  const scale = pickScale ? pickScale(base) : Math.min(2.5, maxWidth / base.width, Math.max(2, 1600 / base.width));
   const vp = page.getViewport({ scale });
   const canvas = document.createElement('canvas');
   canvas.width = Math.floor(vp.width);
@@ -102,4 +107,25 @@ export async function renderPage(pdf: PDFDocumentProxy, n: number, maxWidth = 24
   await page.render({ canvas, canvasContext: ctx, viewport: vp }).promise;
   page.cleanup();
   return { canvas, scale };
+}
+
+export const OCR_DPI = 300;
+
+/**
+ * Scale for on-device OCR: about 300 DPI (Tesseract's sweet spot), capped by pixel count
+ * so a big page does not exhaust memory on a phone. PDF units are 1/72 inch.
+ */
+export function ocrScale(base: { width: number; height: number }): number {
+  const nav = typeof navigator !== 'undefined' ? (navigator as Navigator & { deviceMemory?: number }) : undefined;
+  const lowMemory = (nav?.deviceMemory ?? 8) <= 4;
+  const maxPixels = lowMemory ? 5_000_000 : 8_500_000;
+  let dpi = OCR_DPI;
+  try {
+    dpi = Number(localStorage.getItem('easyread:ocrDpi')) || OCR_DPI; // test hook
+  } catch {
+    /* ignore */
+  }
+  const target = dpi / 72;
+  const capped = Math.sqrt(maxPixels / (base.width * base.height));
+  return Math.max(1, Math.min(target, capped));
 }
