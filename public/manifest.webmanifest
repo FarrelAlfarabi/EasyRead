@@ -1,0 +1,14 @@
+{
+  "name": "EasyRead",
+  "short_name": "EasyRead",
+  "description": "Turn PDF books into easy, phone-sized reading. Private, on your device.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbfbf8",
+  "theme_color": "#2c56c4",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
