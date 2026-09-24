@@ -6,9 +6,15 @@ export interface Line {
   w: number;
   /** Font size (or OCR line height proxy) in PDF points. */
   size: number;
+  /**
+   * Set only for lines that already come pre-classified as a whole paragraph or heading
+   * (e.g. from the Gemini OCR path, which returns structured blocks instead of raw lines).
+   * When set, buildBlocks uses this directly instead of running its layout heuristics.
+   */
+  kind?: 'h' | 'p' | 'hr';
 }
 
-export type PageSource = 'text' | 'ocr' | 'pending' | 'skipped';
+export type PageSource = 'text' | 'ocr' | 'gemini' | 'pending' | 'skipped';
 
 export interface PageData {
   page: number; // 1-based
@@ -64,6 +70,10 @@ export interface OcrState {
   total: number;
   paused: boolean;
   secPerPage?: number;
+  /** Pages read with the on-device Tesseract fallback because Gemini OCR failed or was unavailable. */
+  fallbackPages?: number;
+  /** True once Gemini has failed repeatedly and this run stopped trying it (Tesseract only from then on). */
+  geminiDown?: boolean;
 }
 
 export interface BookMeta {

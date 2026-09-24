@@ -119,7 +119,7 @@ const EDGE_LINES = 2;
 export function removeRunning(pages: PageData[]): PageData[] {
   const textPages = pages.filter((p) => p.lines.length);
   const sizeBySource = new Map<string, number>();
-  for (const src of ['text', 'ocr']) {
+  for (const src of new Set(textPages.map((p) => p.source))) {
     const ls = textPages.filter((p) => p.source === src).flatMap((p) => p.lines);
     if (ls.length) sizeBySource.set(src, bodySize(ls));
   }
@@ -129,10 +129,11 @@ export function removeRunning(pages: PageData[]): PageData[] {
     const idx = new Set<number>();
     for (let i = 0; i < Math.min(EDGE_LINES, n); i++) idx.add(i);
     for (let i = Math.max(0, n - EDGE_LINES); i < n; i++) idx.add(i);
-    // Only lines near the page edges (top 15% / bottom 15%) count.
+    // Only lines near the page edges (top 15% / bottom 15%) count. Pre-classified lines
+    // (e.g. from Gemini OCR, which already excludes headers/footers) are left alone.
     return [...idx].filter((i) => {
       const l = p.lines[i];
-      return l.y < p.height * 0.15 || l.y + l.size > p.height * 0.85;
+      return !l.kind && (l.y < p.height * 0.15 || l.y + l.size > p.height * 0.85);
     });
   };
 
@@ -231,7 +232,7 @@ function looksLikeHeading(l: Line, st: PageStats, gapAbove: number, gapBelow: nu
 export function buildBlocks(pagesIn: PageData[]): Block[] {
   const pages = removeRunning([...pagesIn].sort((a, b) => a.page - b.page));
   const sizeBySource = new Map<string, number>();
-  for (const src of ['text', 'ocr']) {
+  for (const src of new Set(pages.map((p) => p.source))) {
     const ls = pages.filter((p) => p.source === src).flatMap((p) => p.lines);
     if (ls.length) sizeBySource.set(src, bodySize(ls));
   }
@@ -256,6 +257,10 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
     if (heading) blocks.push({ t: 'h', text: heading.text, page: heading.page });
     heading = null;
   };
+  // For lines pre-classified as whole paragraphs/headings (Gemini OCR): track the last
+  // such line and its page, so we only merge a paragraph across an actual page boundary,
+  // never two blocks Gemini already split on the same page.
+  let prevKind: { kind: NonNullable<Line['kind']>; page: number } | null = null;
 
   for (const p of pages) {
     if (!p.lines.length) continue;
@@ -267,6 +272,34 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
       const l = lines[i];
       const text = l.text.trim();
       if (!text) continue;
+
+      if (l.kind) {
+        if (l.kind === 'hr') {
+          flushPara();
+          flushHeading();
+          blocks.push({ t: 'hr', text: '', page: p.page });
+        } else if (l.kind === 'h') {
+          flushPara();
+          if (heading && heading.page === p.page) {
+            heading.text = `${heading.text}: ${text}`.replace(/:\s*:/, ':');
+          } else {
+            flushHeading();
+            heading = { text, page: p.page, y: l.y, spacing: 0 };
+          }
+        } else {
+          flushHeading();
+          const canContinue = para && prevKind?.kind === 'p' && prevKind.page !== p.page && !ENDS_SENTENCE_RE.test(para.text.trim());
+          if (canContinue && para) para.text = `${para.text} ${text}`;
+          else {
+            flushPara();
+            para = { text, page: p.page };
+          }
+        }
+        prevLine = null;
+        prevKind = { kind: l.kind, page: p.page };
+        continue;
+      }
+
       const prevOnPage = i > 0 ? lines[i - 1] : null;
       const nextOnPage = i < lines.length - 1 ? lines[i + 1] : null;
       const gapAbove = prevOnPage ? l.y - prevOnPage.y : st.spacing * 3;
@@ -277,6 +310,7 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
         flushHeading();
         blocks.push({ t: 'hr', text: '', page: p.page });
         prevLine = null;
+        prevKind = null;
         continue;
       }
 
@@ -290,6 +324,7 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
           heading = { text, page: p.page, y: l.y, spacing: st.spacing };
         }
         prevLine = null;
+        prevKind = null;
         continue;
       }
       flushHeading();
@@ -312,6 +347,7 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
       }
       prevLine = l;
       prevStats = st;
+      prevKind = null;
     }
   }
   flushPara();

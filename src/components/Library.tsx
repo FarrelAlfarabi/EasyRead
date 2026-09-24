@@ -146,7 +146,10 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
         )}
         <p className="privacy">
           <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-          Your file stays on this device. Nothing is uploaded.
+          Your file and its text stay on this device and are never uploaded.
+        </p>
+        <p className="privacy small">
+          Exception: a scanned page with no text layer is sent as an image to Google&apos;s Gemini for reading, since that gives much cleaner results than reading it on your device. If Gemini is unreachable, scanned pages are read on your device instead.
         </p>
         <div className="field-inline">
           <label htmlFor="ocr-lang">Language for scanned pages</label>
@@ -156,6 +159,7 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
             ))}
           </select>
         </div>
+        <p className="hint small">Used to help read the page correctly, and for the on-device fallback if needed.</p>
       </section>
 
       {error && (
@@ -175,6 +179,7 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
               const total = live?.total ?? b.ocr?.total ?? 0;
               const spp = live?.secPerPage ?? b.ocr?.secPerPage ?? null;
               const running = live && (live.state === 'running' || live.state === 'loading');
+              const fallbackPages = live?.fallbackPages ?? b.ocr?.fallbackPages ?? 0;
               return (
                 <li key={b.id} className="book-card">
                   <button className="book-open" onClick={() => onOpen(b.id)} aria-label={`Open ${b.title}`}>
@@ -198,6 +203,10 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
                         <span style={{ width: `${(done / Math.max(1, total)) * 100}%` }} />
                       </div>
                       {live?.state === 'error' && <p className="error small">{live.message}</p>}
+                      {live?.message && live.state !== 'error' && <p className="hint small">{live.message}</p>}
+                      {fallbackPages > 0 && (
+                        <p className="hint small">{fallbackPages} page{fallbackPages === 1 ? '' : 's'} read on-device (Gemini was unavailable for them).</p>
+                      )}
                       {running && (
                         <p className="hint small">
                           Keep this tab open{wakeLockSupported ? '. The screen will stay on while scanning.' : ' and the screen on.'} You can start reading now.

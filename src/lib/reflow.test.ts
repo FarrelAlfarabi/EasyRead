@@ -119,3 +119,50 @@ describe('ocrToLines', () => {
     expect(lines[0]).toMatchObject({ text: 'A real line of text.', x: 50, y: 100, w: 300 });
   });
 });
+
+describe('Gemini-tagged lines (kind)', () => {
+  const gPage = (n: number, lines: Array<Partial<Line> & { text: string; kind: 'h' | 'p' | 'hr' }>): PageData => ({
+    page: n,
+    width: W,
+    height: H,
+    source: 'gemini',
+    lines: lines.map((l, i) => ({ x: 54, y: 40 + i * 20, w: 300, size: l.kind === 'h' ? 16 : 11, ...l })),
+  });
+
+  it('uses pre-classified heading and paragraph blocks directly, without heuristics', () => {
+    const pages = [
+      gPage(1, [
+        { text: 'Chapter 7: The Old Mill', kind: 'h' },
+        { text: 'The morning light came slowly over the hills.', kind: 'p' },
+        { text: '* * *', kind: 'hr' },
+        { text: 'Later, Anna walked down the road.', kind: 'p' },
+      ]),
+    ];
+    const { blocks, toc } = buildContent(pages);
+    expect(blocks.map((b) => [b.t, b.text])).toEqual([
+      ['h', 'Chapter 7: The Old Mill'],
+      ['p', 'The morning light came slowly over the hills.'],
+      ['hr', ''],
+      ['p', 'Later, Anna walked down the road.'],
+    ]);
+    expect(toc).toEqual([{ title: 'Chapter 7: The Old Mill', block: 0, level: 0 }]);
+  });
+
+  it('continues a paragraph across a page break only when the prior one is unfinished', () => {
+    const pages = [
+      gPage(1, [{ text: 'This sentence runs onto the next page and', kind: 'p' }]),
+      gPage(2, [{ text: 'finishes here.', kind: 'p' }, { text: 'A brand new paragraph.', kind: 'p' }]),
+    ];
+    const { blocks } = buildContent(pages);
+    expect(blocks.map((b) => b.text)).toEqual([
+      'This sentence runs onto the next page and finishes here.',
+      'A brand new paragraph.',
+    ]);
+  });
+
+  it('never merges two paragraph blocks Gemini already split on the same page', () => {
+    const pages = [gPage(1, [{ text: 'First paragraph without end punctuation', kind: 'p' }, { text: 'Second paragraph.', kind: 'p' }])];
+    const { blocks } = buildContent(pages);
+    expect(blocks).toHaveLength(2);
+  });
+});
