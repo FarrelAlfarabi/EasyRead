@@ -1,12 +1,12 @@
 # EasyRead
 
-EasyRead turns a PDF book into easy, phone-sized reading. Upload a PDF and get clean, reflowed text you can read like an e-book: pages or scroll, your font, your size, your theme.
+EasyRead turns a PDF or EPUB book into easy, phone-sized reading. Upload a PDF and get clean, reflowed text you can read like an e-book: pages or scroll, your font, your size, your theme.
 
 Everything happens in your browser: your file, its text, your library and your settings never leave your device. The one exception is scanned pages (pages with no text layer): those are sent as an image to a cloud reader, Google Gemini or Groq, for accurate reading. EasyRead never reads a page on your device without asking you first: if both cloud readers are unavailable, it asks before doing anything on-device. See "Scanned PDFs and OCR" below. There are no accounts.
 
 ## Features
 
-- Upload by tapping "Choose a PDF" or by dropping a file on the page.
+- Upload a PDF or EPUB by tapping "Choose a PDF or EPUB" or by dropping a file on the page.
 - Smart PDF to text conversion, made for books and novels:
   - Groups text into lines and paragraphs.
   - Removes running headers, footers and page numbers.
@@ -20,16 +20,27 @@ Everything happens in your browser: your file, its text, your library and your s
   - Pause, resume or stop at any time. If you close the tab, cloud OCR picks up where it left off next time (on-device OCR never starts on its own, even after reopening the app).
   - Keeps the screen awake while reading on-device (when the browser supports it).
   - Pick the language: English, Indonesian, English + Indonesian, and a few more. This is passed to the cloud readers as a hint, and used if you choose on-device OCR (whose language data downloads once, then is cached).
+- EPUB books (EPUB 2 and 3): headings, bold and italic, lists, quotes, footnote popups and images (tap to zoom). Table of contents from the book. Title, author and cover show in the library. DRM protected books get a clear message (EasyRead cannot open them). Your fonts and theme win over the book's styles, unless you turn on "Use publisher styles".
 - Reader:
-  - Page mode (tap the left or right side, swipe, or use arrow keys) or scroll mode.
-  - Tap the middle to show the menu: contents, bookmarks, display settings, and a position slider.
-  - Shows percent read and minutes left in the chapter.
-  - Remembers where you stopped.
-  - Two pages side by side on large landscape screens (can be turned off).
-- Display settings with live preview: serif, sans or Atkinson Hyperlegible font, text size, line spacing, margins, line width (in characters), left or justified text, hyphenation, and five themes (light, sepia, dark, black for OLED, and a dim night theme).
-- Library with progress and last read time. Delete books you are done with.
+  - Page mode (tap the sides, swipe, or use arrow keys) or scroll mode. For PDFs there is also an Original page view with margin crop and zoom.
+  - Tap the middle to show the menu: contents, bookmarks, quotes and notes, search, go to page or percent, settings and reading stats.
+  - Highlights in four colours, with notes. Export all notes by copy, share or download.
+  - Full text search, and a Back button after any jump.
+  - Select text to highlight, copy, look it up in a dictionary, translate, or read aloud.
+  - Read aloud (text to speech) with the current sentence highlighted.
+  - Dim overlay, keep screen on, reading ruler, optional bold word starts.
+  - Remembers where you stopped. Two pages side by side on large landscape screens.
+- Last read marker: tap the Mark button in the status bar (or press M) to turn on marking. Then tap any word to mark where you stopped. Tap the same word again to clear it. While marking is on, taps on the margins, swipes and keys still turn pages. Text before the marker is dimmed and a bar (or underline) shows the spot. The marker is saved per book and the book opens there. You can also have the marker move on each page turn (off by default).
+- Display settings with live preview, in tabs:
+  - Text: six fonts (Literata, Source Serif, system sans, Atkinson Hyperlegible, Lexend, OpenDyslexic), size, weight, alignment, hyphenation, and a dyslexia friendly preset.
+  - Spacing: line, letter, word and paragraph spacing, first line indent, line width, and each margin.
+  - Colours: light, sepia, dark, dark sepia, dark gray, black, night, or your own colours (with a contrast check).
+  - Page: pages or scroll, page turn animation, tap zones, status bar items (clock, battery, progress, time left, pages left).
+  - Marker: bar, underline or none, dim read text, auto mark.
+- Library: cover grid, list or authors view. Sort, search, filter by status (to read, reading, finished), favourites and collections.
 - Works offline after the first visit. Can be installed to the home screen.
 
+See [docs/readera-parity.md](docs/readera-parity.md) for how EasyRead compares with ReadEra.
 See [docs/reader-research.md](docs/reader-research.md) for the reading research behind the defaults.
 
 ## Run it locally

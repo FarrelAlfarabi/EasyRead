@@ -22,17 +22,28 @@ Short notes on what makes reading on a phone comfortable, and how EasyRead uses 
 - No distractions while reading: menus hide until you ask for them.
 - Works offline and keeps your files private.
 
+## Newer evidence (2025 review)
+
+- British Dyslexia Association style guide: 16 to 19px body text (or larger), line spacing of 1.5, left aligned text, 60 to 70 characters per line, sans or rounded fonts with clear letter shapes, and a soft background (cream or pastel) instead of pure white. Avoid italics and underlining for emphasis where possible.
+- WCAG 2.2 success criterion 1.4.12 (Text Spacing): content must still work when a reader sets letter spacing to 0.12em, word spacing to 0.16em, line height to 1.5 and paragraph spacing to 2em. EasyRead lets readers go at least that far on each setting.
+- Bionic reading (bolding the start of each word): controlled studies found no speed or comprehension benefit, and some found it slightly slower. Snell (2024) tested it with adults and saw no gain; Doyon (2022) found the same; a 2025 eye-tracking study found no change in fixations or reading speed. EasyRead offers it only as an optional "Bold word starts" setting, off by default.
+- Reading ruler: a band that highlights one line and dims the rest can help some readers keep their place. Evidence is mixed, so it is optional and off by default.
+- Contrast: WCAG asks for at least 4.5:1 for body text. Very high contrast (pure white on pure black) can feel harsh for some readers, so softer dark themes are offered next to the true black one.
+
 ## How EasyRead applies this
 
-- Default text: serif (Literata), 19px, line height 1.6, left aligned, max width 66 characters. Width can go from 45 to 80 characters.
-- Font choices: serif (Literata), sans (system font), and Atkinson Hyperlegible for easy letter recognition.
-- Themes: light, sepia, dark, black (OLED), and night (dim warm text on black, low contrast).
-- Alignment: left or justify. Hyphenation is on by default and can be turned off.
-- Tap zones: left 30% goes back, right 30% goes forward, middle opens the menu. Swipe and arrow keys also work.
-- Footer shows chapter name, percent read, and minutes left in the chapter (based on about 250 words per minute).
-- Table of contents from the PDF outline when it has one, else from detected chapter headings.
-- Bookmarks, and the reading spot is saved on your device automatically.
-- Everything runs in your browser. Files never leave your device.
+- Default text: Literata serif, 19px, weight 400, line height 1.6, left aligned, max width 66 characters, hyphenation on. Width can go from 45 to 80 characters.
+- Fonts: Literata, Source Serif, system sans, Atkinson Hyperlegible Next, Lexend and OpenDyslexic. The first five are variable fonts, so text weight can be set in small steps. OpenDyslexic is offered because some readers like it, though studies do not show it helps on average.
+- A "Dyslexia friendly" preset applies the BDA and WCAG advice in one tap: Lexend, 20px, line spacing 1.8, letter spacing 0.12em, word spacing 0.16em, extra paragraph space, 60 characters per line, left aligned, no hyphenation.
+- Spacing: letter (up to 0.12em or more), word (up to 0.16em or more), paragraph spacing and first line indent, all meeting WCAG 1.4.12.
+- Themes and their text contrast (checked in code, see src/lib/contrast.ts):
+  - Light, sepia, dark, dark sepia, dark gray and black: body text between about 11:1 and 16:1.
+  - Night (dim warm text on black): about 6:1, on purpose, for reading in the dark.
+  - Text before the last read marker is dimmed but stays at 4.5:1 or more, except the night theme at about 4:1.
+  - Custom colours show a warning below 4.5:1.
+- Tap zones: left side goes back, right side goes forward, middle opens the menu. Other layouts are in settings. Swipe and keys also work.
+- Status bar: chapter, percent read and minutes left by default; clock, battery and pages left can be added.
+- Everything runs in your browser. Files never leave your device, except scanned PDF pages sent to cloud OCR.
 - Follows your system dark mode, reduced motion, and phone safe areas (notches).
 
 ## Scanned PDFs (OCR)
@@ -51,9 +62,15 @@ Short notes on what makes reading on a phone comfortable, and how EasyRead uses 
 
 - Complex layouts (two columns, tables, footnotes, magazines) may come out in the wrong order.
 - OCR quality depends on scan quality. Blurry, skewed or handwritten pages give poor text.
-- Images and figures are not shown in the reflowed text.
+- Images in PDFs are not shown in the reflowed text. Use the Original page view for those. EPUB images are shown.
 
 ## Sources
+
+- British Dyslexia Association, Dyslexia Style Guide 2023: https://www.bdadyslexia.org.uk/advice/employers/creating-a-dyslexia-friendly-workplace/dyslexia-friendly-style-guide
+- W3C, Understanding SC 1.4.12 Text Spacing: https://www.w3.org/WAI/WCAG22/Understanding/text-spacing.html
+- Snell, "Bionic Reading does not improve reading speed" (2024), Acta Psychologica: https://www.sciencedirect.com/science/article/pii/S0001691824001811
+- Doyon, "Bionic Reading test" (2022): https://readwise.io/bionic-reading-results
+- Wery and Diliberto, "The effect of a specialized dyslexia font, OpenDyslexic" (2017), Annals of Dyslexia: https://link.springer.com/article/10.1007/s11881-016-0127-1
 
 - Baymard Institute, "Readability: The Optimal Line Length": https://baymard.com/blog/line-length-readability
 - UXPin, "Optimal Line Length for Readability": https://www.uxpin.com/studio/blog/optimal-line-length-for-readability/
