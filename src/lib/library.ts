@@ -1,5 +1,5 @@
 import { db, requestPersistence } from './db';
-import { extractPage, getOutline, getTitle, openPdf } from './pdf';
+import { extractPage, getOutline, getTitle, openPdf, renderPage } from './pdf';
 import type { BookContent, BookMeta, OutlineItem, PageData } from './types';
 import { OCR_LANGS } from './settings';
 import { isPoorText, loadWordRanks, textQuality, type WordRanks } from './ocrCleanup';
@@ -81,6 +81,7 @@ export function rebuildBook(bookId: string): Promise<BookContent | undefined> {
   const run = rebuildChain.then(async () => {
     const book = await db.getBook(bookId);
     if (!book) return undefined;
+    if (book.format === 'epub') return db.getContent(bookId);
     const pages = await db.getPages(bookId);
     const content = await reflow(pages, book.outline, isEnglishBook(book));
     await db.putContent(bookId, content);
@@ -106,6 +107,72 @@ function newId(): string {
     return crypto.randomUUID();
   } catch {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/** PDF or EPUB, picked by file name / type. */
+export async function importBook(file: File, ocrLang: string, onProgress: (p: ImportProgress) => void): Promise<BookMeta> {
+  if (/epub/i.test(file.type) || /\.epub$/i.test(file.name)) return importEpub(file, onProgress);
+  return importPdf(file, ocrLang, onProgress);
+}
+
+/** Approximate "pages" for a reflowable book: about 1500 characters per page. */
+const approxPages = (c: BookContent) => Math.max(1, Math.ceil((c.charIndex[c.charIndex.length - 1] ?? 0) / 1500));
+
+export async function importEpub(file: File, onProgress: (p: ImportProgress) => void = () => undefined, id = newId(), keep?: Partial<BookMeta>): Promise<BookMeta> {
+  requestPersistence();
+  onProgress({ stage: 'reading', done: 0, total: 1 });
+  const buf = await file.arrayBuffer();
+  const { parseEpub, EpubError } = await import('./epub');
+  let parsed;
+  try {
+    parsed = await parseEpub(buf.slice(0));
+  } catch (e) {
+    if (e instanceof EpubError) throw new ImportError(e.message);
+    console.error(e);
+    throw new ImportError('Could not open this EPUB. The file may be damaged.');
+  }
+  onProgress({ stage: 'layout', done: 0, total: 1 });
+  const resKey = (path: string) => `${id}:res:${path}`;
+  for (const [path, r] of parsed.resources) await db.putFile(resKey(path), new Blob([r.data as BlobPart], { type: r.type }));
+  const book: BookMeta = {
+    id,
+    title: parsed.title,
+    author: parsed.author || undefined,
+    format: 'epub',
+    cover: parsed.cover && parsed.resources.has(parsed.cover) ? resKey(parsed.cover) : undefined,
+    css: parsed.css || undefined,
+    fileName: file.name,
+    pageCount: approxPages(parsed.content),
+    addedAt: Date.now(),
+    lastReadAt: 0,
+    progress: 0,
+    position: 0,
+    bookmarks: [],
+    status: 'ready',
+    lang: parsed.lang,
+    outline: [],
+    ...keep,
+  };
+  await db.putFile(id, new Blob([buf], { type: 'application/epub+zip' }));
+  await db.putContent(id, parsed.content);
+  await db.putBook(book);
+  emitLibraryChange(id);
+  return book;
+}
+
+/** Small first-page thumbnail for the library grid. */
+async function savePdfCover(pdf: Awaited<ReturnType<typeof openPdf>>, id: string): Promise<string | undefined> {
+  try {
+    if (typeof document === 'undefined') return undefined;
+    const { canvas } = await renderPage(pdf, 1, 0, (base) => 360 / base.width);
+    const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/jpeg', 0.8));
+    canvas.width = 0;
+    if (!blob) return undefined;
+    await db.putFile(`${id}:cover`, blob);
+    return `${id}:cover`;
+  } catch {
+    return undefined;
   }
 }
 
@@ -135,8 +202,10 @@ export async function importPdf(file: File, ocrLang: string, onProgress: (p: Imp
   }
   const outline = await getOutline(pdf);
   const title = await getTitle(pdf, file.name);
+  const id = newId();
+  const cover = await savePdfCover(pdf, id);
   await pdf.loadingTask.destroy();
-  return saveImported(newId(), file.name, buf, pages, outline, title, ocrLang, onProgress);
+  return saveImported(id, file.name, buf, pages, outline, title, ocrLang, onProgress, { cover });
 }
 
 async function saveImported(
@@ -169,6 +238,7 @@ async function saveImported(
     ocr: needOcr ? { lang: ocrLang, done: 0, total: needOcr, paused: false } : undefined,
     lang: needOcr || ocrLang !== 'eng' ? lang : 'en',
     outline,
+    format: 'pdf',
     ...keep,
   };
 
@@ -197,8 +267,22 @@ export async function reprocessBook(id: string, ocrLang: string, onProgress: (p:
   const book = await db.getBook(id);
   if (!book) return undefined;
   const lang = book.ocr?.lang ?? ocrLang;
-  const keep: Partial<BookMeta> = { addedAt: book.addedAt, lastReadAt: book.lastReadAt, title: book.title, progress: book.progress };
+  // Highlights and the last-read marker are tied to text positions, which change on re-processing.
+  const keep: Partial<BookMeta> = {
+    addedAt: book.addedAt,
+    lastReadAt: book.lastReadAt,
+    title: book.title,
+    progress: book.progress,
+    favorite: book.favorite,
+    readingStatus: book.readingStatus,
+    collections: book.collections,
+    stats: book.stats,
+  };
   const file = await db.getFile(id);
+  if (file && book.format === 'epub') {
+    await db.deleteBook(id);
+    return importEpub(new File([file], book.fileName, { type: 'application/epub+zip' }), onProgress, id, keep);
+  }
   if (file) {
     const buf = await file.arrayBuffer();
     const pdf = await openPdf(buf.slice(0));
@@ -212,9 +296,10 @@ export async function reprocessBook(id: string, ocrLang: string, onProgress: (p:
       if (n % 5 === 0 || n === pdf.numPages) onProgress({ stage: 'text', done: n, total: pdf.numPages });
     }
     const outline = await getOutline(pdf);
-    await pdf.loadingTask.destroy();
     await db.deleteBook(id);
-    return saveImported(id, book.fileName, buf, pages, outline, book.title, lang, onProgress, keep);
+    const cover = await savePdfCover(pdf, id);
+    await pdf.loadingTask.destroy();
+    return saveImported(id, book.fileName, buf, pages, outline, book.title, lang, onProgress, { ...keep, cover });
   }
   // No PDF kept: re-run layout and text repair on the stored text. Without the page images we
   // cannot tell scanner text from real text, so treat text that looks OCR-broken as scanner text.

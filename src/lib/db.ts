@@ -85,6 +85,8 @@ export const db = {
       t.objectStore('books').delete(id);
       t.objectStore('content').delete(id);
       t.objectStore('files').delete(id);
+      // Book resources (EPUB images, covers) are stored as "<id>:...".
+      t.objectStore('files').delete(IDBKeyRange.bound(`${id}:`, `${id}:\uffff`));
       t.objectStore('pages').delete(IDBKeyRange.bound([id, -Infinity], [id, Infinity]));
     }),
 };

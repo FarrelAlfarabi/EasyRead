@@ -30,12 +30,26 @@ export interface PageData {
   ocrLayer?: boolean;
 }
 
-export type BlockType = 'p' | 'h' | 'hr';
+export type BlockType = 'p' | 'h' | 'hr' | 'li' | 'quote' | 'pre' | 'img';
 
 export interface Block {
   t: BlockType;
+  /** Plain text. For blocks with `html`, this equals the rendered element's textContent. */
   text: string;
+  /** PDF: page number. EPUB: spine (chapter file) index. */
   page: number;
+  /** Sanitized inline HTML (EPUB only): em/strong/sup/links etc. */
+  html?: string;
+  /** Heading level (1-6) or list nesting depth. */
+  level?: number;
+  /** List item marker text ("1." or "•"). */
+  marker?: string;
+  /** Image resource path inside the book (t: 'img'). */
+  src?: string;
+  /** Anchor ids that point at this block (EPUB links and footnotes). */
+  ids?: string[];
+  /** Original class names (for "use publisher styles"). */
+  cls?: string;
 }
 
 export interface TocEntry {
@@ -56,6 +70,8 @@ export interface BookContent {
   toc: TocEntry[];
   /** Cumulative character count before each block, plus total at the end. */
   charIndex: number[];
+  /** EPUB: link target ("chapter.xhtml#id" or "chapter.xhtml") to block index. */
+  anchors?: Record<string, number>;
 }
 
 export interface OutlineItem {
@@ -91,9 +107,51 @@ export interface OcrState {
   onDeviceConsent?: boolean;
 }
 
+export type HighlightColor = 'yellow' | 'green' | 'blue' | 'pink';
+
+export interface Highlight {
+  id: string;
+  block: number;
+  start: number; // char offsets in block text
+  end: number;
+  color: HighlightColor;
+  text: string;
+  note?: string;
+  createdAt: number;
+}
+
+/** The reader's "I stopped reading here" marker: one word. */
+export interface ReadMarker {
+  block: number;
+  start: number;
+  end: number;
+  at: number;
+}
+
+export type ReadingStatus = 'none' | 'to-read' | 'reading' | 'read';
+
+export interface ReadingStats {
+  /** Seconds of active reading. */
+  seconds: number;
+  /** Per day (YYYY-MM-DD): seconds read and characters advanced. */
+  days: Record<string, { seconds: number; chars: number }>;
+}
+
 export interface BookMeta {
   id: string;
   title: string;
+  format?: 'pdf' | 'epub';
+  author?: string;
+  /** Files-store key of the cover image, if any. */
+  cover?: string;
+  /** EPUB: the book's CSS, scoped under .pub (used when "publisher styles" is on). */
+  css?: string;
+  favorite?: boolean;
+  readingStatus?: ReadingStatus;
+  collections?: string[];
+  highlights?: Highlight[];
+  marker?: ReadMarker;
+  stats?: ReadingStats;
   fileName: string;
   pageCount: number;
   addedAt: number;
