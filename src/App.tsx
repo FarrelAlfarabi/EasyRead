@@ -39,12 +39,25 @@ export default function App() {
   }, []);
 
   const theme = settings.theme === 'auto' ? (systemDark ? 'dark' : 'light') : resolveTheme(settings.theme);
+  const { customFg, customBg } = settings;
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    const root = document.documentElement;
+    root.dataset.theme = theme;
+    // Custom theme: the user's own text and background colours.
+    const vars = ['--bg', '--fg', '--surface', '--muted', '--border'];
+    if (theme === 'custom') {
+      const fg = customFg;
+      const bg = customBg;
+      root.style.setProperty('--bg', bg);
+      root.style.setProperty('--fg', fg);
+      root.style.setProperty('--surface', `color-mix(in srgb, ${bg} 88%, ${fg})`);
+      root.style.setProperty('--muted', `color-mix(in srgb, ${fg} 70%, ${bg})`);
+      root.style.setProperty('--border', `color-mix(in srgb, ${fg} 20%, ${bg})`);
+    } else for (const v of vars) root.style.removeProperty(v);
     const meta = document.querySelector('meta[name="theme-color"]');
     const bg = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
     if (meta && bg) meta.setAttribute('content', bg);
-  }, [theme]);
+  }, [theme, customFg, customBg]);
 
   const update = useCallback((patch: Partial<Settings>) => {
     setSettings((s) => {
