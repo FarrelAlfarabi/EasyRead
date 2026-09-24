@@ -399,7 +399,7 @@ export interface BuildOptions {
  */
 export function repairPages(pages: PageData[], dict?: WordRanks): PageData[] {
   return pages.map((p) => {
-    if (!p.lines.length || p.source === 'ocr' || p.source === 'gemini') return p;
+    if (!p.lines.length || p.source === 'ocr' || p.source === 'gemini' || p.source === 'groq') return p;
     const respell = !!p.ocrLayer;
     const lines = [...p.lines].sort((a, b) => a.y - b.y || a.x - b.x).map((l) => ({ ...l }));
     // Mend words split over a line break by a hyphen or dash ("com-" / "mit", "at—" / "tention")

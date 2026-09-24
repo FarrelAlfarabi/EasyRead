@@ -14,7 +14,7 @@ export interface Line {
   kind?: 'h' | 'p' | 'hr';
 }
 
-export type PageSource = 'text' | 'ocr' | 'gemini' | 'pending' | 'skipped';
+export type PageSource = 'text' | 'ocr' | 'gemini' | 'groq' | 'pending' | 'skipped';
 
 export interface PageData {
   page: number; // 1-based
@@ -76,10 +76,19 @@ export interface OcrState {
   total: number;
   paused: boolean;
   secPerPage?: number;
-  /** Pages read with the on-device Tesseract fallback because Gemini OCR failed or was unavailable. */
+  /**
+   * Pages read on-device (Tesseract), only ever true after the user explicitly agreed to it
+   * for this book (see onDeviceConsent). EasyRead never runs on-device OCR silently.
+   */
   fallbackPages?: number;
-  /** True once Gemini has failed repeatedly and this run stopped trying it (Tesseract only from then on). */
+  /** True once Gemini has failed repeatedly and this run stopped trying it for the rest of the run. */
   geminiDown?: boolean;
+  /** True once Groq has failed repeatedly and this run stopped trying it for the rest of the run. */
+  groqDown?: boolean;
+  /** Pages that could not be read by either cloud provider and are waiting on the user's choice. */
+  needsConsent?: number;
+  /** The user has agreed to read this book's remaining/failed pages on-device when the cloud can't. */
+  onDeviceConsent?: boolean;
 }
 
 export interface BookMeta {

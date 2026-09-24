@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { db } from '../lib/db';
 import { deleteBook, importPdf, ImportError, onLibraryChange, reprocessBook, type ImportProgress } from '../lib/library';
-import { cancelOcr, ocrStore, pauseOcr, startOcr, wakeLockSupported } from '../lib/ocr';
+import { cancelOcr, ocrStore, pauseOcr, startOcr, enableOnDeviceOcr, wakeLockSupported } from '../lib/ocr';
 import { OCR_LANGS, type Settings } from '../lib/settings';
 import type { BookMeta } from '../lib/types';
 import { formatMinutes } from '../lib/format';
@@ -150,7 +150,7 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
           Your file and its text stay on this device and are never uploaded.
         </p>
         <p className="privacy small">
-          Exception: a scanned page with no text layer is sent as an image to Google&apos;s Gemini for reading, since that gives much cleaner results than reading it on your device. If Gemini is unreachable, scanned pages are read on your device instead.
+          Exception: a scanned page with no text layer is sent as an image to a cloud reader (Google Gemini, or Groq as a backup when Gemini is busy) since that gives much cleaner results than reading it on your device. EasyRead never reads a page on your device without asking you first.
         </p>
         <div className="field-inline">
           <label htmlFor="ocr-lang">Language for scanned pages</label>
@@ -181,6 +181,7 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
               const spp = live?.secPerPage ?? b.ocr?.secPerPage ?? null;
               const running = live && (live.state === 'running' || live.state === 'loading');
               const fallbackPages = live?.fallbackPages ?? b.ocr?.fallbackPages ?? 0;
+              const needsConsent = live?.needsConsent ?? b.ocr?.needsConsent ?? 0;
               return (
                 <li key={b.id} className="book-card">
                   <button className="book-open" onClick={() => onOpen(b.id)} aria-label={`Open ${b.title}`}>
@@ -197,7 +198,9 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
                           ? live.message
                           : running
                             ? `Reading scanned page ${Math.min(done + 1, total)} of ${total}`
-                            : `Scanned ${done} of ${total} pages. Paused.`}
+                            : needsConsent > 0
+                              ? `Read ${done} of ${total} pages.`
+                              : `Scanned ${done} of ${total} pages. Paused.`}
                         {running && spp ? ` · about ${formatMinutes(((total - done) * spp) / 60)} left` : ''}
                       </p>
                       <div className="bar" role="progressbar" aria-label="Scanning progress" aria-valuemin={0} aria-valuemax={total} aria-valuenow={done}>
@@ -206,15 +209,26 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
                       {live?.state === 'error' && <p className="error small">{live.message}</p>}
                       {live?.message && live.state !== 'error' && <p className="hint small">{live.message}</p>}
                       {fallbackPages > 0 && (
-                        <p className="hint small">{fallbackPages} page{fallbackPages === 1 ? '' : 's'} read on-device (Gemini was unavailable for them).</p>
+                        <p className="hint small">{fallbackPages} page{fallbackPages === 1 ? '' : 's'} read on this device, with your OK, because the cloud readers were unavailable.</p>
                       )}
-                      {running && (
-                        <p className="hint small">
-                          Keep this tab open{wakeLockSupported ? '. The screen will stay on while scanning.' : ' and the screen on.'} You can start reading now.
+                      {needsConsent > 0 ? (
+                        <p className="ocr-consent">
+                          Cloud OCR unavailable for {needsConsent} page{needsConsent === 1 ? '' : 's'}. Read {needsConsent === 1 ? 'it' : 'them'} on this device instead? This is slower and less accurate.
                         </p>
+                      ) : (
+                        running && (
+                          <p className="hint small">
+                            Keep this tab open{wakeLockSupported ? '. The screen will stay on while scanning.' : ' and the screen on.'} You can start reading now.
+                          </p>
+                        )
                       )}
                       <div className="row">
-                        {running ? (
+                        {needsConsent > 0 ? (
+                          <>
+                            <button className="btn btn-primary" onClick={() => void enableOnDeviceOcr(b.id)}>Use on-device OCR</button>
+                            <button className="btn" onClick={() => void startOcr(b.id)}>Retry cloud</button>
+                          </>
+                        ) : running ? (
                           <button className="btn" onClick={() => pauseOcr()}>Pause</button>
                         ) : (
                           <button className="btn" onClick={() => void startOcr(b.id)}>Resume</button>

@@ -1,6 +1,6 @@
 import type { Worker as TessWorker } from 'tesseract.js';
+import { CloudOcrError, cloudBlocksToLines, cloudOcrPage, type CloudProvider } from './cloudOcr';
 import { db } from './db';
-import { GeminiOcrError, geminiBlocksToLines, geminiOcrPage } from './geminiOcr';
 import { emitLibraryChange, rebuildBook } from './library';
 import { ocrToLines, type OcrBlockLike } from './ocrLines';
 import { ocrScale, openPdf, renderPage } from './pdf';
@@ -9,16 +9,18 @@ import type { PageData } from './types';
 
 export interface OcrStatus {
   bookId: string | null;
-  state: 'idle' | 'loading' | 'running' | 'paused' | 'error';
+  state: 'idle' | 'loading' | 'running' | 'paused' | 'needs-consent' | 'error';
   done: number;
   total: number;
   secPerPage: number | null;
   message: string;
-  /** Pages in this run that had to fall back to the on-device reader. */
+  /** Pages read on-device this run. Only ever non-zero after the user explicitly agreed to it. */
   fallbackPages: number;
+  /** Pages that could not be read by any cloud provider and are waiting on the user's choice. */
+  needsConsent: number;
 }
 
-let status: OcrStatus = { bookId: null, state: 'idle', done: 0, total: 0, secPerPage: null, message: '', fallbackPages: 0 };
+let status: OcrStatus = { bookId: null, state: 'idle', done: 0, total: 0, secPerPage: null, message: '', fallbackPages: 0, needsConsent: 0 };
 const subs = new Set<() => void>();
 function set(patch: Partial<OcrStatus>) {
   status = { ...status, ...patch };
@@ -62,20 +64,23 @@ export const wakeLockSupported = typeof navigator !== 'undefined' && 'wakeLock' 
 /* ---------------- job control ---------------- */
 
 const BUNDLED_LANGS = ['eng', 'ind'];
-// Gemini page requests in flight at once. A big book must not fire hundreds of parallel
-// requests, and Gemini's own per-key rate limit would just turn extra concurrency into 429s.
-const GEMINI_CONCURRENCY = 3;
-// After this many Gemini failures in a row, stop trying it for the rest of this run and use
-// the on-device reader for every remaining page, so a full Gemini outage does not turn into a
-// 20-second wait per page for a long book.
-const GEMINI_CIRCUIT_BREAKER = 4;
+// Cloud OCR requests in flight at once, per book. A big book must not fire hundreds of
+// parallel requests, and each provider's own rate limit would just turn extra concurrency
+// into more 429s. Gemini and Groq share this pool: each page tries one provider at a time.
+const CLOUD_CONCURRENCY = 3;
+// After this many failures in a row on a given provider, stop trying it for the rest of this
+// run, so an outage does not turn into a long wait per page for a long book.
+const CIRCUIT_BREAKER = 4;
 
 let runId = 0;
 let pauseRequested = false;
 let cancelRequested = false;
 const queue: string[] = [];
 
-async function persistOcr(bookId: string, patch: { done?: number; paused?: boolean; secPerPage?: number; fallbackPages?: number; geminiDown?: boolean }) {
+async function persistOcr(
+  bookId: string,
+  patch: { done?: number; paused?: boolean; secPerPage?: number; fallbackPages?: number; geminiDown?: boolean; groqDown?: boolean; needsConsent?: number; onDeviceConsent?: boolean },
+) {
   const b = await db.getBook(bookId);
   if (!b?.ocr) return;
   await db.updateBook(bookId, { ocr: { ...b.ocr, ...patch } });
@@ -92,6 +97,15 @@ export async function startOcr(bookId: string): Promise<void> {
   await persistOcr(bookId, { paused: false });
   const my = ++runId;
   void run(bookId, my);
+}
+
+/**
+ * The user explicitly agreed to read this book's cloud-unreadable pages on this device.
+ * EasyRead never does this on its own: this is the only way on-device OCR ever runs.
+ */
+export async function enableOnDeviceOcr(bookId: string): Promise<void> {
+  await persistOcr(bookId, { onDeviceConsent: true, needsConsent: 0, paused: false });
+  await startOcr(bookId);
 }
 
 export function pauseOcr(): void {
@@ -124,22 +138,26 @@ async function finishCancel(bookId: string) {
   await rebuildBook(bookId);
 }
 
-/** Resume any scanning that was running when the tab was closed. */
+/**
+ * Resume any cloud OCR that was running when the tab was closed. This only ever retries the
+ * cloud providers, never on-device OCR: a book stopped waiting on the user's consent
+ * (needsConsent > 0) stays stopped until they choose "Use on-device OCR" or "Retry cloud".
+ */
 export async function resumePendingOcr(): Promise<void> {
   try {
     const books = await db.listBooks();
-    for (const b of books) if (b.status === 'ocr' && b.ocr && !b.ocr.paused) await startOcr(b.id);
+    for (const b of books) if (b.status === 'ocr' && b.ocr && !b.ocr.paused && !b.ocr.needsConsent) await startOcr(b.id);
   } catch {
     /* storage unavailable */
   }
 }
 
-/* ---------------- Tesseract (fallback) ---------------- */
+/* ---------------- Tesseract (on-device, consent-gated) ---------------- */
 
 let tess: TessWorker | null = null;
 let tessLoading: Promise<TessWorker> | null = null;
 
-/** Tesseract is only spun up the first time a page actually needs the fallback. */
+/** Tesseract is only ever created after the user has explicitly agreed to on-device OCR. */
 async function getTesseract(lang: string): Promise<TessWorker> {
   if (tess) return tess;
   if (!tessLoading) {
@@ -225,7 +243,7 @@ function debugOcr(): boolean {
   }
 }
 
-// One fallback page at a time: 300 DPI canvases are large, and Tesseract has one worker anyway.
+// One on-device page at a time: 300 DPI canvases are large, and Tesseract has one worker anyway.
 let tessLock: Promise<unknown> = Promise.resolve();
 
 async function tesseractPage(pdf: Awaited<ReturnType<typeof openPdf>>, page: number, lang: string) {
@@ -273,71 +291,96 @@ async function tesseractPage(pdf: Awaited<ReturnType<typeof openPdf>>, page: num
   return run;
 }
 
-/** Timings of the most recent fallback page, for diagnostics and tests. */
+/** Timings of the most recent on-device page, for diagnostics and tests. */
 export let lastTimings: { renderAndPrepMs: number; ocrMs: number; cleanupMs: number } | null = null;
 export let lastPrep: { ms: number; skewDegrees: number } | null = null;
 if (typeof window !== 'undefined') {
   (window as unknown as { __easyreadOcrStats?: () => unknown }).__easyreadOcrStats = () => ({ lastTimings, lastPrep });
 }
 
-/* ---------------- one page: Gemini, falling back to Tesseract ---------------- */
+/* ---------------- one page: Gemini, then Groq, then (only with consent) on-device ---------------- */
+
+export type PageOutcome = 'gemini' | 'groq' | 'ocr' | 'kept-scanner-text' | 'needs-consent';
 
 interface PageResult {
   page: number;
   lines: PageData['lines'];
-  usedFallback: boolean;
-  keptScannerText?: boolean;
+  outcome: PageOutcome;
 }
 
-async function readPage(
+export interface ProviderGate {
+  available: () => boolean;
+  onResult: (ok: boolean) => void;
+}
+
+/** One try (with a single retry/backoff on transient errors) against a cloud provider. */
+async function tryCloud(
+  canvas: HTMLCanvasElement,
+  page: number,
+  pageWidth: number,
+  languageLabel: string,
+  provider: CloudProvider,
+  gate: ProviderGate,
+): Promise<PageData['lines'] | null> {
+  if (!gate.available()) return null;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const blocks = await cloudOcrPage(canvas, languageLabel, provider);
+      gate.onResult(true);
+      return cloudBlocksToLines(blocks, pageWidth);
+    } catch (e) {
+      lastErr = e;
+      if (e instanceof CloudOcrError && e.retryable && attempt === 0) {
+        await new Promise((r) => setTimeout(r, 600 + Math.random() * 600));
+        continue;
+      }
+      break;
+    }
+  }
+  gate.onResult(false);
+  console.warn(`${provider} OCR failed on page ${page}:`, lastErr instanceof Error ? lastErr.message : lastErr);
+  return null;
+}
+
+export async function readPage(
   pdf: Awaited<ReturnType<typeof openPdf>>,
   page: number,
   pageWidth: number,
   lang: string,
-  geminiAvailable: () => boolean,
-  onGeminiResult: (ok: boolean) => void,
+  gemini: ProviderGate,
+  groq: ProviderGate,
+  allowTesseract: boolean,
   provisional?: PageData['lines'],
 ): Promise<PageResult> {
-  if (geminiAvailable()) {
+  const chars = (ls: PageData['lines']) => ls.reduce((n, l) => n + l.text.length, 0);
+  if (gemini.available() || groq.available()) {
     const { canvas } = await renderPage(pdf, page, 1600);
-    const languageLabel = OCR_LANGS.find((l) => l.code === lang)?.label;
+    const languageLabel = OCR_LANGS.find((l) => l.code === lang)?.label ?? 'auto';
     try {
-      let lastErr: unknown;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const blocks = await geminiOcrPage(canvas, languageLabel ?? 'auto');
-          onGeminiResult(true);
-          const lines = geminiBlocksToLines(blocks, pageWidth);
-          // Sanity check against the scanner's own text: if Gemini found far less text than the
-          // scanner did (a blank or unreadable image), keep the scanner text instead.
-          const chars = (ls: PageData['lines']) => ls.reduce((n, l) => n + l.text.length, 0);
-          if (provisional?.length && chars(lines) < chars(provisional) * 0.3) {
-            return { page, lines: provisional, usedFallback: false, keptScannerText: true };
-          }
-          return { page, lines, usedFallback: false };
-        } catch (e) {
-          lastErr = e;
-          // One short backoff-and-retry for transient errors (rate limit, timeout, 5xx)
-          // before giving up on Gemini for this page and using the on-device reader.
-          if (e instanceof GeminiOcrError && e.retryable && attempt === 0) {
-            await new Promise((r) => setTimeout(r, 600 + Math.random() * 600));
-            continue;
-          }
-          break;
+      for (const [provider, gate] of [['gemini', gemini], ['groq', groq]] as const) {
+        const lines = await tryCloud(canvas, page, pageWidth, languageLabel, provider, gate);
+        if (!lines) continue;
+        // Sanity check against the scanner's own text: if the model found far less text than
+        // the scanner did (a blank or unreadable image), keep the scanner text instead.
+        if (provisional?.length && chars(lines) < chars(provisional) * 0.3) {
+          return { page, lines: provisional, outcome: 'kept-scanner-text' };
         }
+        return { page, lines, outcome: provider };
       }
-      onGeminiResult(false);
-      console.warn(`Gemini OCR failed on page ${page}, using on-device reader instead:`, lastErr instanceof Error ? lastErr.message : lastErr);
     } finally {
       canvas.width = 0;
       canvas.height = 0;
     }
   }
-  // A scanned page that came with the scanner's own text: keep that (it gets word repair)
-  // rather than spend seconds on on-device OCR of the same image.
-  if (provisional?.length) return { page, lines: provisional, usedFallback: true, keptScannerText: true };
+  // Both cloud providers failed (or their circuit breakers are open). A scanned page that
+  // came with the scanner's own text is kept as-is (repaired) rather than asking the user
+  // about on-device OCR for text we already have, however rough.
+  if (provisional?.length) return { page, lines: provisional, outcome: 'kept-scanner-text' };
+  // EasyRead never runs on-device OCR without the user explicitly asking for it.
+  if (!allowTesseract) return { page, lines: [], outcome: 'needs-consent' };
   const lines = await tesseractPage(pdf, page, lang);
-  return { page, lines, usedFallback: true };
+  return { page, lines, outcome: 'ocr' };
 }
 
 /** Runs async tasks with at most `limit` in flight, in the given order, stopping if `shouldStop` returns true. */
@@ -351,6 +394,17 @@ async function runPool<T>(items: T[], limit: number, shouldStop: () => boolean, 
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+}
+
+export function makeGate(down: () => boolean, onFail: () => void): ProviderGate {
+  let consecutive = 0;
+  return {
+    available: () => !down(),
+    onResult: (ok) => {
+      if (ok) consecutive = 0;
+      else if (++consecutive >= CIRCUIT_BREAKER) onFail();
+    },
+  };
 }
 
 async function run(bookId: string, my: number) {
@@ -368,22 +422,43 @@ async function run(bookId: string, my: number) {
     let done = total - todo.length;
     let fallbackPages = book.ocr.fallbackPages ?? 0;
     let geminiDown = book.ocr.geminiDown ?? false;
-    set({ bookId, state: 'running', done, total, secPerPage: book.ocr.secPerPage ?? null, fallbackPages, message: '' });
-    void keepAwake(true);
+    let groqDown = book.ocr.groqDown ?? false;
+    const allowTesseract = book.ocr.onDeviceConsent === true;
+    set({ bookId, state: 'running', done, total, secPerPage: book.ocr.secPerPage ?? null, fallbackPages, needsConsent: 0, message: '' });
+    if (allowTesseract) void keepAwake(true);
 
     const pdf = await openPdf(await file.arrayBuffer());
 
     let spp = book.ocr.secPerPage ?? 0;
     let sinceRebuild = 0;
-    let consecutiveGeminiFailures = 0;
     let stopping = false;
+    let needsConsentCount = 0;
     const writeLock: Promise<void>[] = [];
+
+    const geminiGate = makeGate(
+      () => geminiDown,
+      () => {
+        geminiDown = true;
+        set({ message: 'Google Gemini is unavailable right now. Trying Groq for the rest of this book.' });
+      },
+    );
+    const groqGate = makeGate(
+      () => groqDown,
+      () => {
+        groqDown = true;
+        set({
+          message: allowTesseract
+            ? 'Both cloud readers are unavailable right now. Using the on-device reader for the rest of this book (slower, but it will finish).'
+            : 'Both cloud readers are unavailable right now. Remaining pages will need your OK to read on this device.',
+        });
+      },
+    );
 
     const stalePage = async () => my !== runId || cancelRequested || pauseRequested || !(await db.getBook(bookId));
 
     await runPool(
       todo,
-      GEMINI_CONCURRENCY,
+      CLOUD_CONCURRENCY,
       () => stopping,
       async (p) => {
         if (await stalePage()) {
@@ -391,32 +466,23 @@ async function run(bookId: string, my: number) {
           return;
         }
         const t0 = performance.now();
-        const result = await readPage(
-          pdf,
-          p.page,
-          p.width,
-          book.ocr!.lang,
-          () => !geminiDown,
-          (ok) => {
-            consecutiveGeminiFailures = ok ? 0 : consecutiveGeminiFailures + 1;
-            if (!ok && consecutiveGeminiFailures >= GEMINI_CIRCUIT_BREAKER && !geminiDown) {
-              geminiDown = true;
-              set({ message: 'Gemini OCR is unavailable right now. Using the on-device reader for the rest of this book (slower, but it will finish).' });
-            }
-          },
-          p.ocrLayer ? p.lines : undefined,
-        );
+        const result = await readPage(pdf, p.page, p.width, book.ocr!.lang, geminiGate, groqGate, allowTesseract, p.ocrLayer ? p.lines : undefined);
         if (my !== runId) return;
-        if (result.usedFallback) fallbackPages++;
+        if (result.outcome === 'needs-consent') {
+          needsConsentCount++;
+          return;
+        }
+        if (result.outcome === 'ocr') fallbackPages++;
+        const source: PageData['source'] = result.outcome === 'kept-scanner-text' ? 'text' : result.outcome;
+        const lines = result.lines;
         // Serialize DB writes: page tasks finish in parallel, but IndexedDB updates must not race.
         const prevWrite = writeLock.length ? writeLock[writeLock.length - 1] : Promise.resolve();
         const thisWrite = prevWrite.then(async () => {
-          const source = result.keptScannerText ? 'text' : result.usedFallback ? 'ocr' : 'gemini';
-          await db.putPages(bookId, [{ ...p, source, lines: result.lines }]);
+          await db.putPages(bookId, [{ ...p, source, lines }]);
           done++;
           const secs = (performance.now() - t0) / 1000;
           spp = spp ? spp * 0.85 + secs * 0.15 : secs;
-          await persistOcr(bookId, { done, secPerPage: spp, fallbackPages, geminiDown });
+          await persistOcr(bookId, { done, secPerPage: spp, fallbackPages, geminiDown, groqDown });
           set({ done, secPerPage: spp, fallbackPages });
           sinceRebuild++;
           if (done <= 3 || sinceRebuild >= 4) {
@@ -436,8 +502,15 @@ async function run(bookId: string, my: number) {
       cancelRequested = false;
       await finishCancel(bookId);
     } else if (pauseRequested) {
-      await persistOcr(bookId, { paused: true, done, fallbackPages, geminiDown });
+      await persistOcr(bookId, { paused: true, done, fallbackPages, geminiDown, groqDown });
       set({ state: 'paused', message: '' });
+      await rebuildBook(bookId);
+    } else if (needsConsentCount > 0) {
+      // Stop and wait: only the user can send remaining pages to on-device OCR, and leaving
+      // this "paused" (rather than silently retrying) avoids hammering a down cloud provider
+      // every time the app reopens.
+      await persistOcr(bookId, { paused: true, done, fallbackPages, geminiDown, groqDown, needsConsent: needsConsentCount });
+      set({ state: 'needs-consent', needsConsent: needsConsentCount, message: '' });
       await rebuildBook(bookId);
     } else {
       await db.updateBook(bookId, { status: 'ready', ocr: undefined });
@@ -454,6 +527,6 @@ async function run(bookId: string, my: number) {
     void keepAwake(false);
     emitLibraryChange(bookId);
     const next = queue.shift();
-    if (next && (status.state === 'idle' || status.state === 'paused')) void startOcr(next);
+    if (next && (status.state === 'idle' || status.state === 'paused' || status.state === 'needs-consent')) void startOcr(next);
   }
 }

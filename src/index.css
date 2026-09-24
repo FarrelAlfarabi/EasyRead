@@ -343,6 +343,14 @@ select {
   display: grid;
   gap: 8px;
 }
+.ocr-consent {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  font-size: 0.9rem;
+  font-weight: 600;
+}
 .ocr-line {
   margin: 0;
   font-size: 0.925rem;

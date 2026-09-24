@@ -37,15 +37,15 @@ Short notes on what makes reading on a phone comfortable, and how EasyRead uses 
 
 ## Scanned PDFs (OCR)
 
-- A scanned page (one with no text layer) is sent as an image to Google's Gemini for reading. This is the one place in EasyRead where page content leaves your device, and it only happens for pages that need OCR. Gemini gives noticeably cleaner text than reading it on your device: fewer garbled words, correct paragraph breaks, and correctly labelled headings.
-- If Gemini cannot be reached (offline, quota, or an outage), EasyRead automatically reads that page on your device instead, using Tesseract. The book still finishes either way. A small note in the library tells you if some pages had to use the on-device reader.
+- A scanned page (one with no text layer) is sent as an image to a cloud reader for OCR: Google Gemini first, then Groq (Llama 4) if Gemini is busy or down. This is the one place in EasyRead where page content leaves your device, and it only happens for pages that need OCR. Both give noticeably cleaner text than reading it on your device: fewer garbled words, correct paragraph breaks, and correctly labelled headings.
+- If neither cloud reader can be reached for some pages, EasyRead does not read them on your device on its own. It asks first: a prompt lets you choose to read those pages on this device (slower, less accurate) or try the cloud again later. Nothing runs on your device until you say so.
 - The on-device fallback cleans up each page image first (deskew, contrast, adaptive black and white), then repairs obvious OCR mistakes in English with a word list. On a moderately degraded test scan this took word accuracy from 7% to 99%. Very low resolution scans are still poor.
-- Early testing on-device with Tesseract alone gave results like "20: I)C)PJCYT CXDLJBJIT:" for headings and merged words like "thefool" and "commil". Gemini reads the same pages accurately, which is why it is the primary path.
+- Early testing on-device with Tesseract alone gave results like "20: I)C)PJCYT CXDLJBJIT:" for headings and merged words like "thefool" and "commil". Gemini and Groq read the same pages accurately, which is why they come first, with on-device OCR only as a last resort you opt into.
 - OCR takes a few seconds per page, so you can start reading as soon as the first pages are done. Scanning can be paused, resumed and cancelled, and it picks up again if you close the tab.
 - The screen is kept awake while scanning when the browser supports it.
 - Requests are limited to a few pages at a time (not all pages at once), with automatic retries if the service is briefly busy.
-- Language data for the on-device fallback (English, Indonesian and others) downloads once, then is cached. Gemini does not need this; the language picker mainly helps the fallback, and is also passed to Gemini as a hint for the page's language.
-- Cost is small: a page costs a small fraction of a cent to read with Gemini.
+- Language data for on-device OCR (English, Indonesian and others) downloads once, then is cached. The cloud readers do not need this; the language picker mainly helps on-device OCR, and is also passed to Gemini and Groq as a hint for the page's language.
+- Cost is small: a page costs a small fraction of a cent to read with Gemini or Groq.
 
 ## Limits
 
