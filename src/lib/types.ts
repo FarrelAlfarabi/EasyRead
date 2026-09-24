@@ -22,6 +22,12 @@ export interface PageData {
   height: number;
   source: PageSource;
   lines: Line[];
+  /**
+   * The page is a scanned image with an OCR text layer from the scanner (not born-digital
+   * text). Its words may be misread, so stronger repair is applied, and when it looks poor
+   * the page is re-read with OCR.
+   */
+  ocrLayer?: boolean;
 }
 
 export type BlockType = 'p' | 'h' | 'hr';

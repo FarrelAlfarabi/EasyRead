@@ -226,3 +226,182 @@ export function dictionaryRatio(tokens: string[], dict: WordRanks): number {
   }
   return words ? known / words : 1;
 }
+
+/* ------------------------------------------------------------------ */
+/* Line-level repair for OCR text (scanner text layers and Tesseract)   */
+/* ------------------------------------------------------------------ */
+
+const lettersOnly = (t: string) => t.replace(/[^\p{L}]/gu, '');
+
+/**
+ * Split a run of letters with no spaces into the most likely words ("DONOTCOMMIT" ->
+ * "DO NOT COMMIT"). Dynamic programming over word costs: common words are cheap, and
+ * each extra word costs a little so real long words win over fragments.
+ * Returns null if some part cannot be covered by known words.
+ */
+export function segmentWords(run: string, dict: WordRanks): string | null {
+  const s = run.toLowerCase();
+  const n = s.length;
+  if (!n || n > 80) return null;
+  const cost = new Float64Array(n + 1).fill(Infinity);
+  const back = new Int32Array(n + 1).fill(-1);
+  cost[0] = 0;
+  for (let i = 1; i <= n; i++) {
+    for (let j = Math.max(0, i - 20); j < i; j++) {
+      if (cost[j] === Infinity) continue;
+      const w = s.slice(j, i);
+      const r = dict.get(w);
+      if (r === undefined) continue;
+      // Single letters other than "a"/"i" are almost never right in a heading.
+      if (w.length === 1 && w !== 'a' && w !== 'i') continue;
+      const c = cost[j] + 1 + Math.log10(r + 1) * 0.6;
+      if (c < cost[i]) { cost[i] = c; back[i] = j; }
+    }
+  }
+  if (cost[n] === Infinity) return null;
+  const parts: string[] = [];
+  for (let i = n; i > 0; i = back[i]) parts.unshift(run.slice(back[i], i));
+  return parts.join(' ');
+}
+
+/**
+ * Undo letter-spaced type: "J U D GM ENT" -> "JUDGMENT", "D O N OT C OM MIT TO ANYONE"
+ * -> "DO NOT COMMIT TO ANYONE", "2 0" -> "20". A run is a stretch of 3+ tokens made of
+ * short letter groups (1-4 letters) with at least 2 lone letters (other than "a"/"I").
+ */
+export function collapseLetterSpacing(text: string, dict?: WordRanks): string {
+  const toks = text.split(' ');
+  const out: string[] = [];
+  let i = 0;
+  // Letter-spaced digits: "2 0" -> "20".
+  const digitRun = (k: number) => {
+    let j = k;
+    while (j < toks.length && /^\d[:.,)]?$/.test(toks[j])) j++;
+    return j;
+  };
+  while (i < toks.length) {
+    const dj = digitRun(i);
+    if (dj - i >= 2) {
+      out.push(toks.slice(i, dj).join(''));
+      i = dj;
+      continue;
+    }
+    let j = i;
+    let short = 0;
+    while (j < toks.length) {
+      const core = toks[j].replace(/[:,.;!?]+$/u, '');
+      if (!/^\p{L}{1,4}$/u.test(core)) break;
+      // Count lone letters, but not the real one-letter words "a" and "I".
+      if (core.length === 1 && !/^[aAI]$/.test(core)) short++;
+      j++;
+      if (/[:,.;!?]$/.test(toks[j - 1])) break; // punctuation ends the run
+    }
+    if (j - i >= 3 && short >= 2) {
+      const run = toks.slice(i, j);
+      const tail = (run[run.length - 1].match(/[:,.;!?]+$/u) ?? [''])[0];
+      const joined = run.map(lettersOnly).join('');
+      const seg = dict ? segmentWords(joined, dict) : null;
+      // Without a dictionary only rejoin pure one-letter spacing ("L A W").
+      if (seg) out.push(seg + tail);
+      else if (run.every((t) => lettersOnly(t).length === 1)) out.push(joined + tail);
+      else out.push(...run);
+      i = j;
+      continue;
+    }
+    out.push(toks[i]);
+    i++;
+  }
+  return out.join(' ');
+}
+
+/**
+ * Rejoin words broken by OCR: "at—tention" -> "attention" (a dash inside a word where the
+ * pieces are not both words but the join is), and "Par liament" -> "Parliament" (two
+ * non-words that make a word together).
+ */
+export function joinBrokenWords(text: string, dict: WordRanks): string {
+  let toks = text.split(' ').map((t) => {
+    const m = /^(\W*)(\p{L}+)[-–—]+(\p{L}+)(\W*)$/u.exec(t);
+    if (!m) return t;
+    const [, pre, a, b, post] = m;
+    const joined = (a + b).toLowerCase();
+    if (dict.has(joined) && !(dict.has(a.toLowerCase()) && dict.has(b.toLowerCase()) && a.length > 2 && b.length > 2)) return pre + a + b + post;
+    return t;
+  });
+  const out: string[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const a = toks[i];
+    const b = toks[i + 1];
+    if (b !== undefined) {
+      const ca = EDGE_PUNCT.exec(a);
+      const cb = EDGE_PUNCT.exec(b);
+      if (ca && cb && !ca[3] && !cb[1] && /^\p{L}+$/u.test(ca[2]) && /^\p{L}+$/u.test(cb[2])) {
+        const la = ca[2].toLowerCase();
+        const lb = cb[2].toLowerCase();
+        const aKnown = dict.has(la) && (la.length > 1 || la === 'a' || la === 'i');
+        const bKnown = dict.has(lb) && (lb.length > 1 || lb === 'a' || lb === 'i');
+        if ((!aKnown || !bKnown) && dict.has(la + lb) && !(aKnown && bKnown)) {
+          out.push(a + b);
+          i++;
+          continue;
+        }
+      }
+    }
+    out.push(a);
+  }
+  toks = out;
+  return toks.join(' ');
+}
+
+/**
+ * Full repair of one OCR'd line. `respellWords` turns on look-alike respelling, which is
+ * only safe for text that really came from OCR (not a born-digital PDF).
+ */
+export function repairLine(text: string, dict: WordRanks | undefined, respellWords: boolean, conf = 60): string {
+  let t = text.replace(/\s+/g, ' ').trim();
+  t = collapseLetterSpacing(t, dict);
+  if (!dict) return t;
+  t = joinBrokenWords(t, dict);
+  if (respellWords) t = t.split(' ').filter((w) => !isStrayMark(w)).map((w) => repairToken(w, dict, conf)).join(' ');
+  return t;
+}
+
+export interface TextQuality {
+  words: number;
+  unknownRatio: number;
+  letterSpaced: number;
+  junkRatio: number;
+}
+
+/** How "OCR-broken" a page of text looks. */
+export function textQuality(lines: string[], dict?: WordRanks): TextQuality {
+  let words = 0;
+  let unknown = 0;
+  let letterSpaced = 0;
+  let chars = 0;
+  let junk = 0;
+  for (const l of lines) {
+    for (const ch of l) {
+      if (ch === ' ') continue;
+      chars++;
+      if (!/[\p{L}\p{N}.,;:!?'"’“”()\-–—]/u.test(ch)) junk++;
+    }
+    const toks = l.split(/\s+/).filter(Boolean);
+    const shortRun = toks.filter((t) => /^\p{L}{1,2}[:,.]?$/u.test(t)).length;
+    if (toks.length >= 3 && shortRun >= 3 && shortRun / toks.length >= 0.4) letterSpaced++;
+    if (dict) {
+      for (const t of toks) {
+        const core = t.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+        if (core.length < 3 || !/^\p{L}+$/u.test(core)) continue;
+        words++;
+        if (!dict.has(core.toLowerCase())) unknown++;
+      }
+    }
+  }
+  return { words, unknownRatio: words ? unknown / words : 0, letterSpaced, junkRatio: chars ? junk / chars : 0 };
+}
+
+/** True when a page's text layer is bad enough that re-reading the page image is worth it. */
+export function isPoorText(q: TextQuality): boolean {
+  return q.unknownRatio > 0.06 || q.letterSpaced >= 2 || q.junkRatio > 0.02;
+}

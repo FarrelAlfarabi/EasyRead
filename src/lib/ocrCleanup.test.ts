@@ -112,3 +112,53 @@ describe('ocrToLines with cleanup', () => {
     expect(lines[0].text).toBe('If you ask me the fool could not commit to it.');
   });
 });
+
+import { collapseLetterSpacing, joinBrokenWords, repairLine, segmentWords, textQuality, isPoorText } from './ocrCleanup';
+import { couldBeHeading } from './reflow';
+
+describe('scanner text-layer repair', () => {
+  it('collapses letter-spaced headings and digits', () => {
+    expect(collapseLetterSpacing('L A W: 2 0', dict)).toBe('LAW: 20');
+    expect(collapseLetterSpacing('J U D GM ENT', dict)).toBe('JUDGMENT');
+    expect(collapseLetterSpacing('D O N OT C OM MIT TO ANYONE', dict)).toBe('DO NOT COMMIT TO ANYONE');
+    expect(collapseLetterSpacing('B UT B E C O U RTED BY ALL', dict)).toBe('BUT BE COURTED BY ALL');
+    expect(collapseLetterSpacing('O B S E RVAN CE OF THE LAW When Queen', dict)).toBe('OBSERVANCE OF THE LAW When Queen');
+  });
+
+  it('leaves normal sentences alone', () => {
+    for (const s of ['It is a big day for us', 'I saw a man', 'He was in a hurry to go']) expect(collapseLetterSpacing(s, dict)).toBe(s);
+  });
+
+  it('segments glued capitals', () => {
+    expect(segmentWords('DONOTCOMMIT', dict)).toBe('DO NOT COMMIT');
+  });
+
+  it('rejoins words split by a dash or a space', () => {
+    expect(joinBrokenWords('hold at—tention and', dict)).toBe('hold attention and');
+    expect(joinBrokenWords('the Par liament urged', dict)).toBe('the Parliament urged');
+    // Two real words stay apart, and a real dash between words stays.
+    expect(joinBrokenWords('of the house', dict)).toBe('of the house');
+    expect(joinBrokenWords('others——playing', dict)).toBe('others——playing');
+  });
+
+  it('never inserts colons into body text', () => {
+    const out = repairLine('Do not com mit to it, at—tention but never', dict, true);
+    expect(out).not.toContain(':');
+  });
+
+  it('scores broken scanner text as poor and clean text as fine', () => {
+    expect(isPoorText(textQuality(['J U D GM ENT', 'D O N OT C OM MIT', 'It is thefool who tfwy commil'], dict))).toBe(true);
+    expect(isPoorText(textQuality(['The old man walked slowly down to the river that morning.'], dict))).toBe(false);
+  });
+});
+
+describe('heading guard', () => {
+  it('rejects sentence-like lines as headings', () => {
+    expect(couldBeHeading('over them. By not committing your affections, they will only try harder to win you over')).toBe(false);
+    expect(couldBeHeading('mit to any side or cause but yourself. By maintaining your')).toBe(false);
+    expect(couldBeHeading('It is the fool who always rushes to')).toBe(false);
+    expect(couldBeHeading('LAW 20')).toBe(true);
+    expect(couldBeHeading('DO NOT COMMIT TO ANYONE')).toBe(true);
+    expect(couldBeHeading('Chapter 1: The Road to the Market')).toBe(true);
+  });
+});

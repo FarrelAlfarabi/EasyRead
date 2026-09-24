@@ -72,6 +72,12 @@ If that call fails for any reason (offline, rate-limited, Gemini down, or `GEMIN
 - `api/ocr.ts` is the Vercel serverless function that calls the Gemini API. `GEMINI_API_KEY` is read only here.
 - `src/lib/db.ts` stores books, pages and reading state in IndexedDB. Settings live in localStorage.
 
+## Scanned PDFs that already have text
+
+Many scanned books come with a hidden text layer made by the scanner's own OCR, often of poor quality: letter-spaced headings like "J U D GM ENT", glued words like "thefool", and words split by a dash at a line end. EasyRead detects these pages (text drawn invisibly over a page image, or text over a full-page image) and checks how broken the text looks. Poor pages are re-read with Gemini, falling back to the on-device reader, and the scanner text is shown until then. Scanner text that is kept gets repaired: letter-spaced headings are rejoined and split into words ("DO NOT COMMIT TO ANYONE"), broken words are rejoined ("Par liament" becomes "Parliament"), and obvious misreadings are fixed. Long, sentence-like lines are never shown as headings.
+
+Books imported before a fix can be updated with "Re-process" in the library. EasyRead now keeps the original PDF on the device so this can re-read every page. Books imported before this change only have their stored text, so re-processing repairs that text but cannot re-read the images. Bookmarks are cleared on re-process because the text positions change.
+
 ## On-device OCR quality (fallback path)
 
 When Gemini is unavailable, pages are read on-device with Tesseract. Three steps make that much more usable than plain Tesseract:

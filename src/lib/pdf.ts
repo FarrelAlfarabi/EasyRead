@@ -2,6 +2,7 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import type { PDFDocumentProxy } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { itemsToLines, type RawItem } from './reflow';
+import { looksLikeScanWithTextLayer } from './scanDetect';
 import type { OutlineItem, PageData } from './types';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -37,6 +38,7 @@ export async function extractPage(pdf: PDFDocumentProxy, n: number): Promise<Pag
     vp.height,
   );
   const chars = lines.reduce((s, l) => s + l.text.replace(/\s/g, '').length, 0);
+  const ocrLayer = chars >= MIN_TEXT_CHARS ? await looksLikeScanWithTextLayer(page, pdfjs.OPS) : false;
   page.cleanup();
   return {
     page: n,
@@ -44,6 +46,7 @@ export async function extractPage(pdf: PDFDocumentProxy, n: number): Promise<Pag
     height: vp.height,
     source: chars >= MIN_TEXT_CHARS ? 'text' : 'pending',
     lines: chars >= MIN_TEXT_CHARS ? lines : [],
+    ocrLayer,
   };
 }
 

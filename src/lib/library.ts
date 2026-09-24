@@ -2,6 +2,7 @@ import { db, requestPersistence } from './db';
 import { extractPage, getOutline, getTitle, openPdf } from './pdf';
 import type { BookContent, BookMeta, OutlineItem, PageData } from './types';
 import { OCR_LANGS } from './settings';
+import { isPoorText, loadWordRanks, textQuality, type WordRanks } from './ocrCleanup';
 
 /* ---------------- tiny event bus ---------------- */
 
@@ -34,11 +35,42 @@ function getWorker(): Worker {
   return worker;
 }
 
-export function reflow(pages: PageData[], outline: OutlineItem[]): Promise<BookContent> {
+export function reflow(pages: PageData[], outline: OutlineItem[], english = true): Promise<BookContent> {
   const id = ++seq;
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    getWorker().postMessage({ id, pages, outline });
+    getWorker().postMessage({ id, pages, outline, english });
+  });
+}
+
+/** Word repair and quality checks use an English word list; skip them for other languages. */
+export const isEnglishBook = (b: Pick<BookMeta, 'lang' | 'ocr'> & { ocrLang?: string }) =>
+  (b.ocrLang ?? b.ocr?.lang ?? '') === 'eng' || (!b.ocrLang && !b.ocr && b.lang === 'en');
+
+let dictPromise: Promise<WordRanks | undefined> | null = null;
+function englishDict(): Promise<WordRanks | undefined> {
+  if (!dictPromise) {
+    dictPromise = fetch('/dict/en-words.txt')
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then(loadWordRanks)
+      .catch(() => {
+        dictPromise = null;
+        return undefined;
+      });
+  }
+  return dictPromise;
+}
+
+/**
+ * Scanned pages that came with the scanner's own OCR text: if that text looks broken,
+ * queue the page for re-reading (Gemini first). The old text stays as a stand-in until then,
+ * and is used as the fallback if re-reading fails.
+ */
+async function flagPoorScannerText(pages: PageData[], english: boolean): Promise<PageData[]> {
+  const dict = english ? await englishDict() : undefined;
+  return pages.map((p) => {
+    if (p.source !== 'text' || !p.ocrLayer || !p.lines.length) return p;
+    return isPoorText(textQuality(p.lines.map((l) => l.text), dict)) ? { ...p, source: 'pending' } : p;
   });
 }
 
@@ -50,7 +82,7 @@ export function rebuildBook(bookId: string): Promise<BookContent | undefined> {
     const book = await db.getBook(bookId);
     if (!book) return undefined;
     const pages = await db.getPages(bookId);
-    const content = await reflow(pages, book.outline);
+    const content = await reflow(pages, book.outline, isEnglishBook(book));
     await db.putContent(bookId, content);
     emitLibraryChange(bookId);
     return content;
@@ -104,14 +136,29 @@ export async function importPdf(file: File, ocrLang: string, onProgress: (p: Imp
   const outline = await getOutline(pdf);
   const title = await getTitle(pdf, file.name);
   await pdf.loadingTask.destroy();
+  return saveImported(newId(), file.name, buf, pages, outline, title, ocrLang, onProgress);
+}
 
+async function saveImported(
+  id: string,
+  fileName: string,
+  buf: ArrayBuffer,
+  extracted: PageData[],
+  outline: OutlineItem[],
+  title: string,
+  ocrLang: string,
+  onProgress: (p: ImportProgress) => void,
+  keep?: Partial<BookMeta>,
+): Promise<BookMeta> {
+  const english = ocrLang === 'eng';
+  const pages = await flagPoorScannerText(extracted, english);
+  const total = pages.length;
   const needOcr = pages.filter((p) => p.source === 'pending').length;
-  const id = newId();
   const lang = OCR_LANGS.find((l) => l.code === ocrLang)?.html ?? 'en';
   const book: BookMeta = {
     id,
     title,
-    fileName: file.name,
+    fileName,
     pageCount: total,
     addedAt: Date.now(),
     lastReadAt: 0,
@@ -120,18 +167,72 @@ export async function importPdf(file: File, ocrLang: string, onProgress: (p: Imp
     bookmarks: [],
     status: needOcr ? 'ocr' : 'ready',
     ocr: needOcr ? { lang: ocrLang, done: 0, total: needOcr, paused: false } : undefined,
-    lang: needOcr ? lang : 'en',
+    lang: needOcr || ocrLang !== 'eng' ? lang : 'en',
     outline,
+    ...keep,
   };
 
   onProgress({ stage: 'layout', done: 0, total: 1 });
-  const content = await reflow(pages, outline);
+  const content = await reflow(pages, outline, english);
+  if (keep?.progress) {
+    // Re-processing: put the reader back at about the same place.
+    const want = keep.progress * (content.charIndex[content.charIndex.length - 1] ?? 0);
+    book.position = Math.max(0, content.charIndex.findIndex((c) => c > want) - 1);
+  }
   await db.putPages(id, pages);
-  if (needOcr) await db.putFile(id, new Blob([buf], { type: 'application/pdf' }));
+  // Keep the PDF so the book can be re-processed later (and scanned pages re-read).
+  await db.putFile(id, new Blob([buf], { type: 'application/pdf' }));
   await db.putContent(id, content);
   await db.putBook(book);
   emitLibraryChange(id);
   return book;
+}
+
+/**
+ * Run a saved book through the current conversion again, without re-uploading. With the
+ * original PDF on file this re-extracts every page (and re-reads poor scanned pages);
+ * older books imported before the PDF was kept are rebuilt from their stored text.
+ */
+export async function reprocessBook(id: string, ocrLang: string, onProgress: (p: ImportProgress) => void = () => undefined): Promise<BookMeta | undefined> {
+  const book = await db.getBook(id);
+  if (!book) return undefined;
+  const lang = book.ocr?.lang ?? ocrLang;
+  const keep: Partial<BookMeta> = { addedAt: book.addedAt, lastReadAt: book.lastReadAt, title: book.title, progress: book.progress };
+  const file = await db.getFile(id);
+  if (file) {
+    const buf = await file.arrayBuffer();
+    const pdf = await openPdf(buf.slice(0));
+    const pages: PageData[] = [];
+    for (let n = 1; n <= pdf.numPages; n++) {
+      try {
+        pages.push(await extractPage(pdf, n));
+      } catch {
+        pages.push({ page: n, width: 600, height: 800, source: 'pending', lines: [] });
+      }
+      if (n % 5 === 0 || n === pdf.numPages) onProgress({ stage: 'text', done: n, total: pdf.numPages });
+    }
+    const outline = await getOutline(pdf);
+    await pdf.loadingTask.destroy();
+    await db.deleteBook(id);
+    return saveImported(id, book.fileName, buf, pages, outline, book.title, lang, onProgress, keep);
+  }
+  // No PDF kept: re-run layout and text repair on the stored text. Without the page images we
+  // cannot tell scanner text from real text, so treat text that looks OCR-broken as scanner text.
+  const english = lang === 'eng';
+  const dict = english ? await englishDict() : undefined;
+  const stored = await db.getPages(id);
+  const pages = stored.map((p) => {
+    if (p.source !== 'text' || !p.lines.length) return p;
+    const looksScanned = isPoorText(textQuality(p.lines.map((l) => l.text), dict));
+    return looksScanned ? { ...p, ocrLayer: true } : p;
+  });
+  onProgress({ stage: 'layout', done: 0, total: 1 });
+  await db.putPages(id, pages);
+  const content = await reflow(pages, book.outline, english);
+  await db.putContent(id, content);
+  await db.updateBook(id, { position: Math.min(book.position, Math.max(0, content.blocks.length - 1)) });
+  emitLibraryChange(id);
+  return db.getBook(id);
 }
 
 export async function deleteBook(id: string): Promise<void> {

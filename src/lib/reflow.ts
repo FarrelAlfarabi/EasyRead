@@ -1,4 +1,5 @@
 import type { Block, BookContent, Line, OutlineItem, PageData, Section, TocEntry } from './types';
+import { repairLine, type WordRanks } from './ocrCleanup';
 
 /* ------------------------------------------------------------------ */
 /* Text items -> lines                                                  */
@@ -198,7 +199,10 @@ function pageStats(p: PageData, fallback: PageStats | undefined, body: number): 
     if (d > 0) dys.push(d);
   }
   const spacing = median(dys) || body * 1.3;
-  return { left, width, spacing, center: left + width / 2, body };
+  // Centre of the text block: from the left margin to the (near) right-most text edge, so
+  // ragged-right pages do not pull the centre left.
+  const right = Math.max(left + width, percentile(p.lines.map((l) => l.x + l.w), 0.9));
+  return { left, width, spacing, center: (left + right) / 2, body };
 }
 
 function joinLines(a: string, b: string): string {
@@ -208,15 +212,37 @@ function joinLines(a: string, b: string): string {
   return a + ' ' + b;
 }
 
+/** Headings are short and title-like. Anything sentence-like is body text, whatever its size. */
+export function couldBeHeading(text: string): boolean {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 12 || text.length > 80) return false;
+  // Ends mid-word or mid-sentence ("... to", "com-"): a wrapped body line.
+  if (/[-–—,;]$/.test(text)) return false;
+  const letterWords = words.filter((w) => /^\p{L}/u.test(w));
+  const lower = letterWords.filter((w) => /^\p{Ll}/u.test(w)).length;
+  // Body lines are mostly lowercase words; headings are Title Case or CAPITALS.
+  if (letterWords.length > 4 && lower / letterWords.length > 0.5) return false;
+  // Several sentences in one line: body text.
+  if ((text.match(/[.!?]["”’]?\s+\p{Lu}/gu) ?? []).length >= 1 && words.length > 6) return false;
+  return true;
+}
+
 function looksLikeHeading(l: Line, st: PageStats, gapAbove: number, gapBelow: number): boolean {
   const text = l.text.trim();
-  if (text.length > 120) return false;
+  if (!couldBeHeading(text)) return false;
+  // A full-width line is a wrapped body line, even if the size estimate says "big"
+  // (scanner text layers often have jittery font sizes).
+  if (l.w > st.width * 0.9 && Math.abs(l.x - st.left) < st.body * 2 && !CHAPTER_RE.test(text)) return false;
   const big = l.size >= st.body * 1.2;
   const lineCenter = l.x + l.w / 2;
   const centered = Math.abs(lineCenter - st.center) < st.width * 0.08 && l.w < st.width * 0.8;
   if (big && text.length < 100 && /\p{L}|\d/u.test(text)) return true;
   if (CHAPTER_RE.test(text) && text.length < 70 && (centered || gapAbove > st.spacing * 1.8 || l.size > st.body * 1.05)) return true;
   if (NUMERAL_RE.test(text) && (centered || big) && gapBelow > st.spacing * 1.3) return true;
+  // Short centered line in capitals ("DO NOT COMMIT TO ANYONE", "JUDGMENT").
+  const caps = text.replace(/[^\p{L}]/gu, '');
+  const centeredAnyWidth = Math.abs(lineCenter - st.center) < st.width * 0.08 && l.w < st.width * 0.97;
+  if (centeredAnyWidth && caps.length >= 4 && caps === caps.toUpperCase() && text.split(/\s+/).length <= 8) return true;
   // Short centered, title-like line with space around it.
   if (
     centered &&
@@ -316,7 +342,7 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
 
       if (looksLikeHeading(l, st, gapAbove, gapBelow)) {
         flushPara();
-        if (heading && heading.page === p.page && l.y - heading.y < st.spacing * 4) {
+        if (heading && heading.page === p.page && l.y - heading.y < st.spacing * 4 && heading.text.length + text.length < 100) {
           heading.text = `${heading.text}: ${text}`.replace(/:\s*:/, ':');
           heading.y = l.y;
         } else {
@@ -361,8 +387,40 @@ export function buildBlocks(pagesIn: PageData[]): Block[] {
 
 const MAX_SECTION_BLOCKS = 300;
 
-export function buildContent(pages: PageData[], outline: OutlineItem[] = []): BookContent {
-  const blocks = buildBlocks(pages);
+export interface BuildOptions {
+  /** English word ranks; enables dictionary-based repair of OCR-looking text. */
+  dict?: WordRanks;
+}
+
+/**
+ * Clean up text that came from OCR before layout: collapse letter-spaced headings,
+ * rejoin broken words, and (for scanner OCR layers only) repair misread words.
+ * Tesseract pages were already repaired when read, Gemini text needs none.
+ */
+export function repairPages(pages: PageData[], dict?: WordRanks): PageData[] {
+  return pages.map((p) => {
+    if (!p.lines.length || p.source === 'ocr' || p.source === 'gemini') return p;
+    const respell = !!p.ocrLayer;
+    const lines = [...p.lines].sort((a, b) => a.y - b.y || a.x - b.x).map((l) => ({ ...l }));
+    // Mend words split over a line break by a hyphen or dash ("com-" / "mit", "at—" / "tention")
+    // before anything else looks at the pieces, so they are never "repaired" separately.
+    if (dict) {
+      for (let i = 0; i + 1 < lines.length; i++) {
+        const a = /(\p{L}+)[-–—]$/u.exec(lines[i].text);
+        const b = /^(\p{Ll}+)/u.exec(lines[i + 1].text);
+        if (!a || !b || lines[i].kind || lines[i + 1].kind) continue;
+        if (!dict.has((a[1] + b[1]).toLowerCase())) continue;
+        const first = /^(\S+)\s*/u.exec(lines[i + 1].text)!;
+        lines[i].text = lines[i].text.slice(0, a.index) + a[1] + first[1];
+        lines[i + 1].text = lines[i + 1].text.slice(first[0].length);
+      }
+    }
+    return { ...p, lines: lines.filter((l) => l.text.trim()).map((l) => (l.kind ? l : { ...l, text: repairLine(l.text, dict, respell) })) };
+  });
+}
+
+export function buildContent(pages: PageData[], outline: OutlineItem[] = [], opts: BuildOptions = {}): BookContent {
+  const blocks = buildBlocks(repairPages(pages, opts.dict));
 
   let toc: TocEntry[] = [];
   const usable = outline.filter((o) => o.page >= 1);

@@ -120,7 +120,6 @@ async function finishCancel(bookId: string) {
   const rest = pages.filter((p) => p.source === 'pending').map((p): PageData => ({ ...p, source: 'skipped' }));
   if (rest.length) await db.putPages(bookId, rest);
   await db.updateBook(bookId, { status: 'ready', ocr: undefined });
-  await db.deleteFile(bookId);
   if (status.bookId === bookId) set({ bookId: null, state: 'idle', message: '' });
   await rebuildBook(bookId);
 }
@@ -287,6 +286,7 @@ interface PageResult {
   page: number;
   lines: PageData['lines'];
   usedFallback: boolean;
+  keptScannerText?: boolean;
 }
 
 async function readPage(
@@ -296,6 +296,7 @@ async function readPage(
   lang: string,
   geminiAvailable: () => boolean,
   onGeminiResult: (ok: boolean) => void,
+  provisional?: PageData['lines'],
 ): Promise<PageResult> {
   if (geminiAvailable()) {
     const { canvas } = await renderPage(pdf, page, 1600);
@@ -306,7 +307,14 @@ async function readPage(
         try {
           const blocks = await geminiOcrPage(canvas, languageLabel ?? 'auto');
           onGeminiResult(true);
-          return { page, lines: geminiBlocksToLines(blocks, pageWidth), usedFallback: false };
+          const lines = geminiBlocksToLines(blocks, pageWidth);
+          // Sanity check against the scanner's own text: if Gemini found far less text than the
+          // scanner did (a blank or unreadable image), keep the scanner text instead.
+          const chars = (ls: PageData['lines']) => ls.reduce((n, l) => n + l.text.length, 0);
+          if (provisional?.length && chars(lines) < chars(provisional) * 0.3) {
+            return { page, lines: provisional, usedFallback: false, keptScannerText: true };
+          }
+          return { page, lines, usedFallback: false };
         } catch (e) {
           lastErr = e;
           // One short backoff-and-retry for transient errors (rate limit, timeout, 5xx)
@@ -325,6 +333,9 @@ async function readPage(
       canvas.height = 0;
     }
   }
+  // A scanned page that came with the scanner's own text: keep that (it gets word repair)
+  // rather than spend seconds on on-device OCR of the same image.
+  if (provisional?.length) return { page, lines: provisional, usedFallback: true, keptScannerText: true };
   const lines = await tesseractPage(pdf, page, lang);
   return { page, lines, usedFallback: true };
 }
@@ -393,13 +404,15 @@ async function run(bookId: string, my: number) {
               set({ message: 'Gemini OCR is unavailable right now. Using the on-device reader for the rest of this book (slower, but it will finish).' });
             }
           },
+          p.ocrLayer ? p.lines : undefined,
         );
         if (my !== runId) return;
         if (result.usedFallback) fallbackPages++;
         // Serialize DB writes: page tasks finish in parallel, but IndexedDB updates must not race.
         const prevWrite = writeLock.length ? writeLock[writeLock.length - 1] : Promise.resolve();
         const thisWrite = prevWrite.then(async () => {
-          await db.putPages(bookId, [{ ...p, source: result.usedFallback ? 'ocr' : 'gemini', lines: result.lines }]);
+          const source = result.keptScannerText ? 'text' : result.usedFallback ? 'ocr' : 'gemini';
+          await db.putPages(bookId, [{ ...p, source, lines: result.lines }]);
           done++;
           const secs = (performance.now() - t0) / 1000;
           spp = spp ? spp * 0.85 + secs * 0.15 : secs;
@@ -428,7 +441,6 @@ async function run(bookId: string, my: number) {
       await rebuildBook(bookId);
     } else {
       await db.updateBook(bookId, { status: 'ready', ocr: undefined });
-      await db.deleteFile(bookId);
       await rebuildBook(bookId);
       set({ bookId: null, state: 'idle', message: '' });
     }

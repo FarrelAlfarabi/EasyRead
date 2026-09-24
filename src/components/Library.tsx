@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { db } from '../lib/db';
-import { deleteBook, importPdf, ImportError, onLibraryChange, type ImportProgress } from '../lib/library';
+import { deleteBook, importPdf, ImportError, onLibraryChange, reprocessBook, type ImportProgress } from '../lib/library';
 import { cancelOcr, ocrStore, pauseOcr, startOcr, wakeLockSupported } from '../lib/ocr';
 import { OCR_LANGS, type Settings } from '../lib/settings';
 import type { BookMeta } from '../lib/types';
@@ -27,6 +27,7 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
   const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [reprocessing, setReprocessing] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const ocr = useSyncExternalStore(ocrStore.subscribe, ocrStore.get);
 
@@ -225,6 +226,28 @@ export default function Library({ settings, onSettings, onOpen }: Props) {
                       </div>
                     </div>
                   )}
+                  <div className="book-actions">
+                    <button
+                      className="btn btn-small"
+                      disabled={reprocessing !== null || !!running}
+                      aria-busy={reprocessing === b.id}
+                      onClick={async () => {
+                        setReprocessing(b.id);
+                        setError(null);
+                        try {
+                          const next = await reprocessBook(b.id, settings.ocrLang);
+                          if (next?.status === 'ocr') void startOcr(b.id);
+                        } catch (e) {
+                          console.error(e);
+                          setError('Could not re-process this book.');
+                        } finally {
+                          setReprocessing(null);
+                        }
+                      }}
+                    >
+                      {reprocessing === b.id ? 'Re-processing...' : 'Re-process'}
+                    </button>
+                  </div>
                   <button
                     className="icon-btn book-delete"
                     aria-label={`Delete ${b.title}`}
